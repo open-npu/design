@@ -641,11 +641,329 @@ module systolic_array #(
 
 ---
 
-## 9. 后处理单元 (PPU) 微架构
+## 9. DMA Engine 微架构
+
+DMA Engine 负责外部存储（主 SRAM）与内部 Scratchpad 之间的数据搬运，支持多维张量地址生成、ping-pong 调度和总线突发传输。
+
+### 9.1 整体结构
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                         DMA Engine                                    │
+│                                                                      │
+│  ┌──────────────┐     ┌──────────────────┐     ┌──────────────────┐  │
+│  │  Descriptor  │     │  Address         │     │  Wishbone B4     │  │
+│  │  Queue       │────→│  Generator       │────→│  Master Port     │  │
+│  │  (4-entry)   │     │  (2D/3D stride)  │     │  (pipeline)      │  │
+│  └──────┬───────┘     └────────┬─────────┘     └────────┬─────────┘  │
+│         │                      │                        │            │
+│         │ desc                 │ ext_addr               │ bus req/   │
+│         │                      │                        │ resp       │
+│  ┌──────┴───────┐     ┌────────┴─────────┐     ┌───────┴─────────┐  │
+│  │  DMA         │     │  SRAM            │     │  Data            │  │
+│  │  Controller  │     │  Address Gen     │     │  Buffer          │  │
+│  │  (FSM)       │     │  (local side)    │     │  (FIFO 8-entry)  │  │
+│  └──────┬───────┘     └────────┬─────────┘     └───────┬─────────┘  │
+│         │ ctrl                 │ sram_addr              │ data       │
+│         │                      │                        │            │
+│         ▼                      ▼                        ▼            │
+│  ┌───────────────────────────────────────────────────────────────┐   │
+│  │                  Scratchpad Write/Read Port                    │   │
+│  │  (Weight Buf / Activation Buf / DW Buf / PSum)                │   │
+│  └───────────────────────────────────────────────────────────────┘   │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+                    │                              ▲
+                    ▼                              │
+        ┌─────────────────────┐        ┌─────────────────────┐
+        │  Wishbone Bus       │        │  Control Unit        │
+        │  (to ext SRAM)      │        │  (descriptor kick)   │
+        └─────────────────────┘        └─────────────────────┘
+```
+
+### 9.2 Descriptor 描述符格式
+
+每次 DMA 传输由一个描述符驱动，描述符由 Control Unit 填充后 kick 到队列：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    DMA Descriptor (128 bits)                      │
+├──────────────┬──────────────────────────────────────────────────┤
+│ [31:0]       │ ext_base_addr    外部SRAM起始地址                  │
+│ [63:32]      │ sram_base_addr   内部Scratchpad起始地址            │
+│ [79:64]      │ xfer_len         单行传输长度 (bytes)              │
+│ [91:80]      │ row_count        行数 (2D传输)                    │
+│ [111:92]     │ ext_row_stride   外部行步长 (bytes)                │
+│ [119:112]    │ sram_row_stride  内部行步长 (bytes, 0=连续)        │
+│ [121:120]    │ direction        0=EXT→SRAM(load), 1=SRAM→EXT(store)│
+│ [123:122]    │ target           00=Act, 01=Wgt, 10=DW, 11=PSum   │
+│ [124]        │ irq_en           传输完成后是否触发中断             │
+│ [125]        │ chain            是否自动启动队列中下一条描述符      │
+│ [127:126]    │ reserved                                          │
+└──────────────┴──────────────────────────────────────────────────┘
+```
+
+### 9.3 多维地址生成器
+
+支持 2D 张量搬运（带 stride），用于 im2col-free 的输入 tile 加载：
+
+```
+                ┌───────────────────────────────────────┐
+                │       Address Generator               │
+                │                                       │
+                │  for (row = 0; row < row_count; row++)│
+                │    for (col = 0; col < xfer_len; col += BUS_WIDTH) │
+                │      ext_addr  = ext_base  + row × ext_row_stride  + col │
+                │      sram_addr = sram_base + row × sram_row_stride + col │
+                │                                       │
+                └───────────────────────────────────────┘
+
+典型用例:
+┌─────────────────────────────────────────────────────────────┐
+│ 加载 3×3 Conv 输入 patch (with padding):                      │
+│                                                              │
+│ 外部 Feature Map (H×W×C layout):                             │
+│   ┌───┬───┬───┬───┬───┬───┐                                  │
+│   │   │   │   │   │   │   │  row_stride = W × C × sizeof    │
+│   ├───┼───┼───┼───┼───┼───┤                                  │
+│   │   │ x │ x │ x │   │   │  ← row 0 of patch              │
+│   ├───┼───┼───┼───┼───┼───┤                                  │
+│   │   │ x │ x │ x │   │   │  ← row 1 of patch              │
+│   ├───┼───┼───┼───┼───┼───┤                                  │
+│   │   │ x │ x │ x │   │   │  ← row 2 of patch              │
+│   ├───┼───┼───┼───┼───┼───┤                                  │
+│   │   │   │   │   │   │   │                                  │
+│   └───┴───┴───┴───┴───┴───┘                                  │
+│                                                              │
+│ DMA descriptor:                                              │
+│   ext_base = &feature[oh][ow][0]                             │
+│   xfer_len = tile_W × C_in × 2 bytes                        │
+│   row_count = tile_H (包含kernel扩展)                         │
+│   ext_row_stride = W × C_in × 2                             │
+│   sram_row_stride = tile_W × C_in × 2 (连续存放)            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 9.4 Data Buffer (FIFO)
+
+解耦总线时序与 Scratchpad 写入时序：
+
+```
+         Wishbone              FIFO (8-entry × 32-bit)         Scratchpad
+        ─────────            ─────────────────────────         ──────────
+                              ┌───┬───┬───┬───┬───┐
+  bus_dat_i ──→ push ──→      │ 0 │ 1 │ 2 │ 3 │...│  ──→ pop ──→ sram_wdata
+                              └───┴───┴───┴───┴───┘
+  bus_ack   ──→ push_en       wr_ptr        rd_ptr     ──→ sram_wen
+
+  FIFO 作用:
+  1. 吸收 Wishbone pipeline burst 的突发数据
+  2. Scratchpad 端口被占用时（计算读取）暂存数据
+  3. Store方向: Scratchpad读出 → FIFO → Wishbone写出
+```
+
+### 9.5 Ping-Pong 调度与 Chain 模式
+
+```
+Control Unit 发射描述符序列 (chain=1 自动连续执行):
+
+  Desc[0]: LOAD activation tile[0] → Act_Buf Bank[0]     chain=1
+  Desc[1]: LOAD weight[0]          → Wgt_Buf Bank[0]     chain=0 (等计算)
+           ── 计算启动 tile[0] ──
+  Desc[2]: LOAD activation tile[1] → Act_Buf Bank[1]     chain=1 (与计算并行)
+  Desc[3]: LOAD weight[1]          → Wgt_Buf Bank[1]     chain=0
+           ── ping-pong 切换 ──
+  Desc[4]: STORE result tile[0]    → 外部SRAM             chain=1
+  Desc[5]: LOAD activation tile[2] → Act_Buf Bank[0]     chain=0
+           ...
+
+描述符队列深度=4，流水线式填充，Control Unit 提前2个tile准备描述符。
+```
+
+### 9.6 Wishbone B4 Pipeline 接口
+
+```
+Burst 传输时序 (pipeline mode):
+                ___     ___     ___     ___     ___     ___
+  clk       ___|   |___|   |___|   |___|   |___|   |___|   |___
+             ___ ___ ___ ___ ___
+  cyc       |   |   |   |   |   |
+  stb       |___|___|___|___|___|_______
+  addr       A0   A1   A2   A3   A4
+                 ___ ___ ___ ___ ___
+  ack           |   |   |   |   |   |
+  dat_i          D0   D1   D2   D3   D4
+
+  - Pipeline mode: 不等 ack 即可发下一个 stb
+  - 连续地址自增, 最大 burst = xfer_len / 4
+  - 支持 incrementing burst (wrap burst 不需要)
+  - 最大突发长度: 受限于 FIFO 深度 (8 words = 32 bytes/burst)
+
+带宽:
+  @ 200MHz, 32-bit bus, pipeline mode:
+  峰值: 200M × 4B = 800 MB/s
+  实际 (考虑turnaround): ~600 MB/s
+```
+
+### 9.7 DMA Controller 状态机
+
+```
+                    ┌──────────┐
+         reset ───→│   IDLE   │
+                    └────┬─────┘
+                         │ desc_valid (队列非空)
+                         ▼
+                    ┌──────────┐
+                    │  SETUP   │  解析描述符, 配置地址生成器
+                    └────┬─────┘
+                         │
+              ┌──────────┴──────────┐
+              │ direction?          │
+              ▼                     ▼
+        ┌──────────┐          ┌──────────┐
+        │  LOAD    │          │  STORE   │
+        │ ext→sram │          │ sram→ext │
+        └────┬─────┘          └────┬─────┘
+             │                     │
+             │ row loop            │ row loop
+             │ xfer_len done       │ xfer_len done
+             │ row_count done      │ row_count done
+             ▼                     ▼
+        ┌──────────────────────────────┐
+        │           DONE               │
+        └────┬──────────────────┬──────┘
+             │ chain=1           │ chain=0
+             │ 且队列非空         │ 或队列空
+             ▼                   ▼
+        (取下一条desc)       ┌──────────┐
+        → 回到 SETUP         │  IDLE    │
+                             └──────────┘
+                              (if irq_en → 触发中断)
+```
+
+### 9.8 Zero Padding 支持
+
+Conv 的 padding 在 DMA 加载时处理，避免计算单元特殊逻辑：
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  SRAM Activation Buffer (tile with padding):             │
+│                                                          │
+│  ┌───┬───────────────────┬───┐                           │
+│  │ 0 │        0          │ 0 │  ← top padding (DMA填0)  │
+│  ├───┼───────────────────┼───┤                           │
+│  │ 0 │  real data (DMA)  │ 0 │  ← left/right pad = 0   │
+│  │ 0 │                   │ 0 │                           │
+│  │ 0 │                   │ 0 │                           │
+│  ├───┼───────────────────┼───┤                           │
+│  │ 0 │        0          │ 0 │  ← bottom padding        │
+│  └───┴───────────────────┴───┘                           │
+│                                                          │
+│  实现方式:                                                │
+│  1. DMA 先将 tile 区域清零 (一次burst写0)                 │
+│  2. 再用带stride的2D搬运写入真实数据到中间区域             │
+│  或:                                                     │
+│  1. Address Gen 对 pad 区域跳过总线请求, 直接写0到SRAM    │
+│     (节省总线带宽, 需硬件判断 row/col 是否在 pad 区域)    │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 9.9 接口信号
+
+```verilog
+module dma_engine #(
+    parameter FIFO_DEPTH   = 8,     // Data FIFO entries
+    parameter DESC_DEPTH   = 4,     // Descriptor queue depth
+    parameter BUS_WIDTH    = 32,    // Wishbone data width (bits)
+    parameter ADDR_WIDTH   = 32,    // Address width
+    parameter SRAM_ADDR_W  = 17     // Internal SRAM address (128KB)
+)(
+    input  wire                     clk,
+    input  wire                     rst_n,
+
+    // Wishbone B4 Master Port
+    output wire                     wb_cyc_o,
+    output wire                     wb_stb_o,
+    output wire                     wb_we_o,
+    output wire [ADDR_WIDTH-1:0]    wb_adr_o,
+    output wire [BUS_WIDTH-1:0]     wb_dat_o,
+    output wire [BUS_WIDTH/8-1:0]   wb_sel_o,
+    input  wire                     wb_ack_i,
+    input  wire [BUS_WIDTH-1:0]     wb_dat_i,
+    input  wire                     wb_stall_i,   // pipeline flow control
+
+    // Scratchpad Ports
+    output wire                     sram_wen,
+    output wire [SRAM_ADDR_W-1:0]   sram_addr,
+    output wire [BUS_WIDTH-1:0]     sram_wdata,
+    input  wire [BUS_WIDTH-1:0]     sram_rdata,
+    output wire [1:0]               sram_target,  // 00=Act,01=Wgt,10=DW,11=PSum
+
+    // Control Interface (from Control Unit)
+    input  wire                     desc_push,
+    input  wire [127:0]             desc_data,
+    output wire                     desc_full,
+
+    // Status
+    output wire                     busy,
+    output wire                     irq,           // transfer complete interrupt
+    output wire [15:0]              bytes_done     // progress counter
+);
+```
+
+### 9.10 资源估算
+
+| 组件 | 规格 | 面积 |
+|------|------|------|
+| Descriptor Queue | 4×128-bit register file | ~80 LUT + 512 FF |
+| Address Generator (ext) | 32-bit adder + stride mul | ~100 LUT |
+| Address Generator (sram) | 17-bit adder + stride | ~50 LUT |
+| DMA Controller FSM | 状态机 + 行/列计数器 | ~150 LUT |
+| Data FIFO | 8×32-bit | ~60 LUT + 256 FF |
+| Wishbone Master | pipeline burst 逻辑 | ~120 LUT |
+| Zero-pad 判断 | row/col 边界比较器 | ~40 LUT |
+| **DMA Engine 总计** | | **~600 LUT + ~800 FF** |
+
+DMA Engine 面积很小（~600 LUT），但对整体性能影响关键——搬运能否被计算隐藏决定了有效利用率。
+
+### 9.11 带宽需求分析
+
+```
+以模型最大层为例 (1×1 Conv, C_in=512, C_out=512, 14×14 output):
+
+输入  tile: 16 pixels × 512 ch × 2B = 16,384 bytes
+权重  tile: 16 C_out × 512 C_in × 2B = 16,384 bytes
+输出  tile: 16 pixels × 16 ch × 2B   = 512 bytes (PPU产出后写回)
+
+计算时间: 16 × 512 × 16 / 256 MACs_per_cycle = 512 cycles
+
+需搬运: 16,384 + 16,384 = 32,768 bytes (input + weight of next tile)
+搬运时间: 32,768 / 4 = 8,192 cycles (32-bit bus, 1 word/cycle)
+
+搬运/计算比: 8192 / 512 = 16 ← 搬运来不及!
+
+解决方案:
+  1. 权重复用: 同一权重 tile 用于多个输入 tile, 不需每次重加载
+     → 权重加载摊薄到 tile_count 次
+  2. 实际: 14×14 = 196 pixels / 16 = ~12 个输入tile共用同一权重
+     → 权重搬运摊到 16384/12 ≈ 1365 bytes/tile
+     → 总搬运 = 16384 + 1365 = 17,749 bytes = 4,437 cycles
+     → 搬运/计算 = 4437/512 = 8.7 ← 仍需优化
+
+  3. 总线加宽到 64-bit: 搬运时间减半 → 4437/2 = 2,218 cycles → 比值=4.3
+  4. 或将 bus clock 与 compute clock 解耦 (bus 2:1 faster)
+
+  V1.0 选择: 32-bit bus, 接受该层利用率 ~12%
+  权重已驻留 Scratchpad 时 (小模型): 利用率可达 ~80%+
+```
+
+---
+
+## 10. 后处理单元 (PPU) 微架构
 
 Post-Processing Unit 负责累加器域→输出量化域的转换，支持 Conv requantize 和 Add rescale 两种工作模式，复用同一条 datapath。
 
-### 9.1 PPU 数据通路
+### 10.1 PPU 数据通路
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -726,7 +1044,7 @@ Post-Processing Unit 负责累加器域→输出量化域的转换，支持 Conv
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-### 9.2 工作模式与时序
+### 10.2 工作模式与时序
 
 #### CONV_REQ 模式（1 cycle/element，流水线化）
 
@@ -769,7 +1087,7 @@ Cycle 2: 处理输入 B + 累加
 | RELU_ONLY | 仅做 ReLU，其余旁路 | 1 cycle |
 | PASS_THROUGH | 直通，不做任何处理 | 1 cycle |
 
-### 9.3 Per-Channel 参数存储
+### 10.3 Per-Channel 参数存储
 
 PPU 通过查表获取每个输出通道的 requantize 参数：
 
@@ -798,7 +1116,7 @@ Add Parameter Entry:
 = 42 bits，对齐到 6 bytes
 ```
 
-### 9.4 Add 节点 Rescale 原理
+### 10.4 Add 节点 Rescale 原理
 
 两路输入 scale 不同时，需对齐到输出 scale 再相加：
 
@@ -812,7 +1130,7 @@ c_q = (a_q × M_A + round) >> S_A  +  (b_q × M_B + round) >> S_B
 
 硬件复用 CONV_REQ 的乘法器和移位器，2 cycle 完成一个元素。
 
-### 9.5 硬件资源估算
+### 10.5 硬件资源估算
 
 | 组件 | 规格 | 面积 |
 |------|------|------|
@@ -829,7 +1147,7 @@ c_q = (a_q × M_A + round) >> S_A  +  (b_q × M_B + round) >> S_B
 
 PPU 占 16×16 脉动阵列 (~25K LUT) 的 ~2%，面积代价极小。
 
-### 9.6 PPU 与整体流水线的关系
+### 10.6 PPU 与整体流水线的关系
 
 ```
 Systolic Array                PPU                    SRAM
@@ -851,13 +1169,13 @@ PPU 总面积 = 16 × 550 = ~8,800 LUT，占整芯片 ~6%。
 
 ---
 
-## 10. 关键设计参数
+## 11. 关键设计参数
 
-### 10.1 时钟频率目标
+### 11.1 时钟频率目标
 - FPGA原型：100-200 MHz（Artix-7）
 - ASIC目标：200-400 MHz（28nm/40nm）
 
-### 10.2 FPGA资源估算（Artix-7 200T）
+### 11.2 FPGA资源估算（Artix-7 200T）
 | 资源 | 估计用量 | 芯片总量 | 占比 |
 |------|----------|----------|------|
 | DSP48 | ~256-512 | 740 | 35-70% |
@@ -865,7 +1183,7 @@ PPU 总面积 = 16 × 550 = ~8,800 LUT，占整芯片 ~6%。
 | BRAM (36Kb) | ~36-72 | 365 | 10-20% |
 | FF | ~20-40K | 269K | 7-15% |
 
-### 10.3 性能模型
+### 11.3 性能模型
 - 16×16阵列 @ 200MHz = 102.4 GOPS (INT8, 2-MAC/PE) 或 51.2 GOPS (INT16, 1-MAC/PE)
 - 需要2个阵列交替或1个阵列+高频达到200 GOPS INT8目标
 - INT16模式峰值约 100 GOPS（面积换精度，MCU场景可接受）
@@ -873,7 +1191,7 @@ PPU 总面积 = 16 × 550 = ~8,800 LUT，占整芯片 ~6%。
 
 ---
 
-## 11. 决策依赖链
+## 12. 决策依赖链
 
 ```
 目标场景(MCU IP) → 性能(0.2T) → 工作负载(CNN) → 数据类型(INT8/16)
@@ -885,7 +1203,7 @@ PPU 总面积 = 16 × 550 = ~8,800 LUT，占整芯片 ~6%。
 
 ---
 
-## 12. CSR寄存器定义
+## 13. CSR寄存器定义
 
 详见 [npu-register-spec.md](npu-register-spec.md)
 
