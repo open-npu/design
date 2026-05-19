@@ -361,11 +361,291 @@ Systolic Array同时支持INT8模式（高吞吐低精度场景）：
 
 ---
 
-## 8. 后处理单元 (PPU) 微架构
+## 8. 脉动阵列 (Systolic Array) 微架构
+
+16×16 Weight Stationary 脉动阵列是 NPU 的主力计算单元，负责 Conv2D / FC 的矩阵乘法。
+
+### 8.1 整体结构
+
+```
+              Weight Load (from Weight Scratchpad)
+              ↓ ↓ ↓ ↓ ↓ ↓ ↓ ↓ ↓ ↓ ↓ ↓ ↓ ↓ ↓ ↓   (16 columns)
+          ┌───┬───┬───┬───┬───┬───────────────┬───┐
+          │W  │W  │W  │W  │W  │     ...       │W  │  ← weight preload
+          │L  │L  │L  │L  │L  │               │L  │     (per-column)
+          ├───┼───┼───┼───┼───┼───────────────┼───┤
+ act[0]→  │PE │PE │PE │PE │PE │     ...       │PE │  → drain[0]
+          │0,0│0,1│0,2│0,3│0,4│               │0,F│
+          ├───┼───┼───┼───┼───┼───────────────┼───┤
+ act[1]→  │PE │PE │PE │PE │PE │     ...       │PE │  → drain[1]
+          │1,0│1,1│1,2│1,3│1,4│               │1,F│
+          ├───┼───┼───┼───┼───┼───────────────┼───┤
+ act[2]→  │PE │PE │PE │PE │PE │     ...       │PE │  → drain[2]
+          │2,0│2,1│2,2│2,3│2,4│               │2,F│
+          ├───┼───┼───┼───┼───┼───────────────┼───┤
+          │   │   │   │   │   │               │   │
+          │        ... (rows 3~14)             │   │
+          │   │   │   │   │   │               │   │
+          ├───┼───┼───┼───┼───┼───────────────┼───┤
+ act[F]→  │PE │PE │PE │PE │PE │     ...       │PE │  → drain[F]
+          │F,0│F,1│F,2│F,3│F,4│               │F,F│
+          └───┴───┴───┴───┴───┴───────────────┴───┘
+                                                │
+                                    drain (psum out)
+                                    → 16 个 PPU 并行处理
+```
+
+- **行 (Row)**：对应不同的输出像素（或 batch 内不同位置）
+- **列 (Column)**：对应不同的输出通道 (C_out)
+- **Activation** 从左侧逐行广播，向右逐拍传递
+- **Weight** 预先加载到每个 PE 内部寄存器，计算期间不动 (Weight Stationary)
+- **Partial Sum** 在每个 PE 内本地累加，计算结束后从右侧 drain 排出
+
+### 8.2 PE (Processing Element) 内部结构
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    PE[row][col]                       │
+│                                                      │
+│  ┌─────────────┐                                     │
+│  │ weight_reg  │  ← Weight Load 阶段写入              │
+│  │ (16-bit)    │     计算期间保持不变 (stationary)     │
+│  └──────┬──────┘                                     │
+│         │ w                                          │
+│         ▼                                            │
+│  ┌─────────────────┐     ┌──────────────┐            │
+│  │   MULTIPLIER    │◄────│  act_in      │←── 来自左邻 │
+│  │  16×16 → 32-bit │     │  (16-bit)    │    PE/输入  │
+│  │  (INT8: 2×并行)  │     └──────┬───────┘            │
+│  └────────┬────────┘            │                    │
+│           │ product (32-bit)    │ act_out            │
+│           ▼                     ▼                    │
+│  ┌─────────────────┐     ┌──────────────┐            │
+│  │   ACCUMULATOR   │     │  act_reg     │──→ 传递给   │
+│  │   40-bit signed │     │  (16-bit)    │    右邻PE   │
+│  │   acc += product│     │  1-cycle延迟  │            │
+│  └────────┬────────┘     └──────────────┘            │
+│           │                                          │
+│           │ acc (40-bit)                             │
+│           ▼                                          │
+│  ┌─────────────────┐                                 │
+│  │   acc_reg       │  计算完成后 drain → PPU          │
+│  │  (40-bit)       │  或继续累加 (partial sum)        │
+│  └─────────────────┘                                 │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+
+PE 接口：
+  输入: clk, rst_n, mode(WGT_LOAD/COMPUTE/DRAIN)
+        act_in[15:0], wgt_in[15:0]
+  输出: act_out[15:0], acc_out[39:0]
+```
+
+### 8.3 数据流时序 (Weight Stationary)
+
+以 1×1 Conv 为例：C_in=4, C_out=16, 输出像素=16
+
+```
+Phase 1: Weight Load (预加载权重到 PE)
+═══════════════════════════════════════
+  - Control Unit 从 Weight Scratchpad 逐列加载
+  - 每 cycle 加载 1 列 (16 个权重)
+  - 16 列共需 16 cycles（可流水与前一层 drain 重叠）
+
+  cycle 0: col0 的 16 个 PE 各加载 w[0][0..15]
+  cycle 1: col1 的 16 个 PE 各加载 w[1][0..15]
+  ...
+  cycle 15: col15 的 16 个 PE 各加载 w[15][0..15]
+
+Phase 2: Compute (激活数据流过阵列)
+═══════════════════════════════════════
+  - 每 cycle 输入一组 C_in 中的 1 个通道的 16 个像素
+  - 激活从左向右传播，每 PE 延迟 1 cycle
+
+  cycle 0: act[:,cin=0] 进入 col0, PE[r,0].acc += act[r,0] × w[0,cin=0]
+  cycle 1: act[:,cin=0] 传到 col1, PE[r,1].acc += act[r,0] × w[1,cin=0]
+           act[:,cin=1] 进入 col0, PE[r,0].acc += act[r,1] × w[0,cin=1]
+  ...
+  cycle 3: act[:,cin=0] 传到 col3 (最后有效列对cin=0)
+           同时 cin=1,2,3 分别在 col2,1,0
+
+  计算总 cycles = C_in + ARRAY_N - 1 = 4 + 16 - 1 = 19 cycles
+
+Phase 3: Drain (排出累加结果)
+═══════════════════════════════════════
+  - 所有 PE 完成累加后，每行的 acc 同时向右输出
+  - 16 行同时 drain → 16 个 PPU 并行处理
+  - drain 耗时 = 1 cycle（所有行并行）
+```
+
+### 8.4 通用矩阵映射
+
+Conv2D 通过 im2col 展开映射到矩阵乘法：
+
+```
+标准 Conv2D: Output[n, oh, ow, co] = Σ Input[n, oh+kh, ow+kw, ci] × Weight[co, kh, kw, ci]
+
+展开为矩阵乘:
+  A[M×K] × B[K×N] = C[M×N]
+
+  M = batch × OH × OW     (输出像素总数)    → 映射到 rows
+  K = KH × KW × C_in      (reduction dim)  → 逐 cycle 流入
+  N = C_out                (输出通道)       → 映射到 columns
+
+Tiling:
+  M_tile = ARRAY_M = 16   (每次处理16个输出像素)
+  N_tile = ARRAY_N = 16   (每次处理16个输出通道)
+  K 方向逐步流入，无需tiling（除非partial sum场景）
+```
+
+### 8.5 INT8 双倍吞吐模式
+
+当 `SUPPORT_INT16=1` 时，每个 PE 的 16-bit 乘法器在 INT8 模式下可拆分：
+
+```
+INT16 模式:                    INT8 模式:
+┌──────────────────┐           ┌──────────────────┐
+│  16×16 → 32-bit │           │ 上半: 8×8 → 16-bit│  ← MAC pair A
+│  1 MAC/cycle     │           │ 下半: 8×8 → 16-bit│  ← MAC pair B
+└──────────────────┘           │ 2 MACs/cycle      │
+                               └──────────────────┘
+
+INT8 吞吐 = 2 × INT16 吞吐
+  INT16: 16×16×1 = 256 MACs/cycle
+  INT8:  16×16×2 = 512 MACs/cycle
+```
+
+### 8.6 Weight Load 与 Compute 重叠
+
+为避免 weight load 的空闲时间，采用**双缓冲权重寄存器**：
+
+```
+┌────────────────────────────────────────────────────┐
+│  PE 内部双权重寄存器                                 │
+│                                                    │
+│  ┌────────────┐    ┌────────────┐                   │
+│  │ weight_A   │    │ weight_B   │                   │
+│  │ (active)   │    │ (loading)  │                   │
+│  └─────┬──────┘    └─────┬──────┘                   │
+│        │                 │                          │
+│        └────┐   ┌───────┘                           │
+│             ▼   ▼                                   │
+│         ┌──────────┐                                │
+│         │ 2:1 MUX  │  sel = buf_sel                 │
+│         └────┬─────┘                                │
+│              │ → 送入乘法器                           │
+│              ▼                                      │
+└────────────────────────────────────────────────────┘
+
+时序:
+  Layer N 计算中 (用 weight_A)，同时 DMA 加载 Layer N+1 权重到 weight_B
+  Layer N 完成后，buf_sel 翻转，Layer N+1 立即开算，零等待
+```
+
+### 8.7 Partial Sum 处理
+
+当 K (reduction dimension) 超过累加器安全范围时，需分段累加：
+
+```
+C_in = 1024, 40-bit acc 安全上限 = 512 (1×1 Conv)
+
+分段策略:
+  Pass 1: 累加 cin[0:511]   → psum_1 (40-bit) → 写回 SRAM
+  Pass 2: 累加 cin[512:1023] → psum_2 (40-bit)
+  Final:  psum_1 + psum_2 → 完整 acc → PPU requantize
+
+Partial sum 存储:
+  - 存回 Activation Scratchpad (40-bit/word)
+  - 每个输出元素需 5 bytes (40-bit 对齐到 5B)
+  - 16×16 tile: 16×16×5 = 1280 bytes
+```
+
+### 8.8 控制状态机
+
+```
+                    ┌──────────┐
+         reset ───→│   IDLE   │
+                    └────┬─────┘
+                         │ start
+                         ▼
+                    ┌──────────┐    weight load done
+              ┌───→│ WGT_LOAD │────────────────┐
+              │    └──────────┘                │
+              │                                ▼
+              │    ┌──────────┐           ┌──────────┐
+              │    │  DRAIN   │◄──────────│ COMPUTE  │
+              │    └────┬─────┘ K exhausted└──────────┘
+              │         │                       │
+              │         │ drain done            │ K > max_safe
+              │         ▼                       ▼
+              │    ┌──────────┐           ┌──────────┐
+              │    │   DONE   │           │PSUM_STORE│
+              │    └────┬─────┘           └────┬─────┘
+              │         │ more tiles           │ store done
+              │         ▼                      │
+              │    (next tile)                  │
+              └────────────────────────────────┘
+                         │ all tiles done
+                         ▼
+                    IRQ → CPU
+```
+
+### 8.9 阵列接口信号
+
+```verilog
+module systolic_array #(
+    parameter ARRAY_M    = 16,    // rows
+    parameter ARRAY_N    = 16,    // columns
+    parameter DATA_WIDTH = 16,    // 8 or 16
+    parameter ACC_WIDTH  = 40     // 32~48
+)(
+    input  wire                    clk,
+    input  wire                    rst_n,
+
+    // Control
+    input  wire [1:0]              mode,          // IDLE/WGT_LOAD/COMPUTE/DRAIN
+    input  wire                    buf_sel,       // weight double-buffer select
+
+    // Weight Load (from Weight Scratchpad)
+    input  wire [ARRAY_M-1:0]     wgt_load_en,   // per-row load enable
+    input  wire [DATA_WIDTH-1:0]  wgt_load_data [ARRAY_M-1:0],  // broadcast per column
+
+    // Activation Input (from Activation Scratchpad)
+    input  wire [DATA_WIDTH-1:0]  act_in [ARRAY_M-1:0],  // 16 rows parallel
+
+    // Accumulator Output (to PPU)
+    output wire [ACC_WIDTH-1:0]   acc_out [ARRAY_M-1:0],  // 16 rows parallel (drain)
+    output wire                   acc_valid,
+
+    // Partial Sum I/O (to/from SRAM)
+    input  wire [ACC_WIDTH-1:0]   psum_in [ARRAY_M-1:0],
+    input  wire                   psum_load,
+    output wire [ACC_WIDTH-1:0]   psum_out [ARRAY_M-1:0],
+    output wire                   psum_valid
+);
+```
+
+### 8.10 资源估算
+
+| 组件 | 每 PE | 16×16 阵列 (256 PE) |
+|------|-------|---------------------|
+| 16×16 乘法器 | 1 DSP48 或 ~60 LUT | 256 DSP / ~15,360 LUT |
+| 40-bit 累加器 | ~60 LUT + 40 FF | ~15,360 LUT + 10,240 FF |
+| weight_reg ×2 | 32 FF | 8,192 FF |
+| act_reg | 16 FF | 4,096 FF |
+| 控制/MUX | ~10 LUT | ~2,560 LUT |
+| **PE 小计** | ~130 LUT + 88 FF (+ 1 DSP) | |
+| **阵列总计** | | **~33K LUT + 22K FF + 256 DSP** |
+
+加上阵列外围控制逻辑 (~2K LUT)，整个 Systolic Array 模块约 **35K LUT + 256 DSP**。
+
+---
+
+## 9. 后处理单元 (PPU) 微架构
 
 Post-Processing Unit 负责累加器域→输出量化域的转换，支持 Conv requantize 和 Add rescale 两种工作模式，复用同一条 datapath。
 
-### 8.1 PPU 数据通路
+### 9.1 PPU 数据通路
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -446,7 +726,7 @@ Post-Processing Unit 负责累加器域→输出量化域的转换，支持 Conv
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-### 8.2 工作模式与时序
+### 9.2 工作模式与时序
 
 #### CONV_REQ 模式（1 cycle/element，流水线化）
 
@@ -489,7 +769,7 @@ Cycle 2: 处理输入 B + 累加
 | RELU_ONLY | 仅做 ReLU，其余旁路 | 1 cycle |
 | PASS_THROUGH | 直通，不做任何处理 | 1 cycle |
 
-### 8.3 Per-Channel 参数存储
+### 9.3 Per-Channel 参数存储
 
 PPU 通过查表获取每个输出通道的 requantize 参数：
 
@@ -518,7 +798,7 @@ Add Parameter Entry:
 = 42 bits，对齐到 6 bytes
 ```
 
-### 8.4 Add 节点 Rescale 原理
+### 9.4 Add 节点 Rescale 原理
 
 两路输入 scale 不同时，需对齐到输出 scale 再相加：
 
@@ -532,7 +812,7 @@ c_q = (a_q × M_A + round) >> S_A  +  (b_q × M_B + round) >> S_B
 
 硬件复用 CONV_REQ 的乘法器和移位器，2 cycle 完成一个元素。
 
-### 8.5 硬件资源估算
+### 9.5 硬件资源估算
 
 | 组件 | 规格 | 面积 |
 |------|------|------|
@@ -549,7 +829,7 @@ c_q = (a_q × M_A + round) >> S_A  +  (b_q × M_B + round) >> S_B
 
 PPU 占 16×16 脉动阵列 (~25K LUT) 的 ~2%，面积代价极小。
 
-### 8.6 PPU 与整体流水线的关系
+### 9.6 PPU 与整体流水线的关系
 
 ```
 Systolic Array                PPU                    SRAM
@@ -571,13 +851,13 @@ PPU 总面积 = 16 × 550 = ~8,800 LUT，占整芯片 ~6%。
 
 ---
 
-## 9. 关键设计参数
+## 10. 关键设计参数
 
-### 9.1 时钟频率目标
+### 10.1 时钟频率目标
 - FPGA原型：100-200 MHz（Artix-7）
 - ASIC目标：200-400 MHz（28nm/40nm）
 
-### 9.2 FPGA资源估算（Artix-7 200T）
+### 10.2 FPGA资源估算（Artix-7 200T）
 | 资源 | 估计用量 | 芯片总量 | 占比 |
 |------|----------|----------|------|
 | DSP48 | ~256-512 | 740 | 35-70% |
@@ -585,7 +865,7 @@ PPU 总面积 = 16 × 550 = ~8,800 LUT，占整芯片 ~6%。
 | BRAM (36Kb) | ~36-72 | 365 | 10-20% |
 | FF | ~20-40K | 269K | 7-15% |
 
-### 9.3 性能模型
+### 10.3 性能模型
 - 16×16阵列 @ 200MHz = 102.4 GOPS (INT8, 2-MAC/PE) 或 51.2 GOPS (INT16, 1-MAC/PE)
 - 需要2个阵列交替或1个阵列+高频达到200 GOPS INT8目标
 - INT16模式峰值约 100 GOPS（面积换精度，MCU场景可接受）
@@ -593,7 +873,7 @@ PPU 总面积 = 16 × 550 = ~8,800 LUT，占整芯片 ~6%。
 
 ---
 
-## 10. 决策依赖链
+## 11. 决策依赖链
 
 ```
 目标场景(MCU IP) → 性能(0.2T) → 工作负载(CNN) → 数据类型(INT8/16)
@@ -605,7 +885,7 @@ PPU 总面积 = 16 × 550 = ~8,800 LUT，占整芯片 ~6%。
 
 ---
 
-## 11. CSR寄存器定义
+## 12. CSR寄存器定义
 
 详见 [npu-register-spec.md](npu-register-spec.md)
 
