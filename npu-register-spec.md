@@ -310,7 +310,7 @@
 
 | Bit | 描述 |
 |-----|------|
-| [31:0] | Per-channel requantize参数（M/S/zp/bias）在外部SRAM的字节地址 |
+| [31:0] | Per-channel requantize参数（M/S/zp/bias）在外部SRAM的字节地址（4字节对齐） |
 
 等价于 POST_PARAM_ADDR (0x184)，两者写任一个均可（硬件共用同一寄存器，双映射便于编程）。
 
@@ -393,7 +393,7 @@ Per-channel requantize 参数（M/S/bias/zp）存储在外部 SRAM 中，由 DMA
 | [2] | RELU_EN | 0 | 1=在requantize后启用ReLU (max(0,x)) |
 | [3] | RELU6_EN | 0 | 1=ReLU6模式 (clamp to [0, 6×scale]) |
 | [4] | LUT_EN | 0 | 1=启用LUT激活函数（替代ReLU） |
-| [5] | ZP_EN | 0 | 1=启用输出零点加法（INT8 mode） |
+| [5] | ZP_EN | 0 | 1=启用输出零点加法（INT8/INT16通用） |
 | [6] | BIAS_EN | 0 | 1=启用per-channel bias加法 |
 | [7] | INT16_OUT | 0 | 1=输出为INT16, 0=输出为INT8 |
 | [31:8] | — | 0 | 保留 |
@@ -407,7 +407,7 @@ acc(40-bit) → +bias_q[ch] → ×M[ch] → >>S[ch](+round) → +zp[ch] → clam
 
 | Bit | 描述 |
 |-----|------|
-| [31:0] | Per-channel requantize参数在外部SRAM的字节地址（8字节对齐） |
+| [31:0] | Per-channel requantize参数在外部SRAM的字节地址（4字节对齐） |
 
 DMA 在计算启动前自动将参数加载到片上 Parameter SRAM。
 
@@ -418,7 +418,7 @@ DMA 在计算启动前自动将参数加载到片上 Parameter SRAM。
 | [15:0] | PARAM_CH_COUNT | 需加载的输出通道数（= OUT_C） |
 | [31:16] | — | 保留 |
 
-DMA 加载字节数 = PARAM_CH_COUNT × 8 bytes。
+DMA 加载字节数 = PARAM_CH_COUNT × 10 bytes。
 
 ### 0x18C POST_CLAMP — Clamp范围 [RW]
 
@@ -477,18 +477,19 @@ Add 参数格式（每节点 8 bytes）：
 ```
 基地址: POST_PARAM_ADDR
 
-偏移 (per channel, 8 bytes each):
+偏移 (per channel, 10 bytes each):
 ┌─────────────────────────────────────────────────────────────────┐
 │  byte offset │ 内容                                              │
 ├──────────────┼──────────────────────────────────────────────────┤
 │  [0:1]       │ M[14:0] (15-bit unsigned multiplier, bit15=0)    │
 │  [2]         │ S[5:0]  (6-bit shift amount, bit7:6=0)           │
-│  [3]         │ zp[7:0] (8-bit output zero point, INT16时=0)     │
-│  [4:7]       │ bias_q[31:0] (32-bit signed, little-endian)      │
+│  [3]         │ reserved (0x00)                                   │
+│  [4:5]       │ zp[15:0] (16-bit signed output zero point)       │
+│  [6:9]       │ bias_q[31:0] (32-bit signed, little-endian)      │
 └──────────────┴──────────────────────────────────────────────────┘
 
-总大小: OUT_C × 8 bytes
-示例: 512通道 = 4,096 bytes
+总大小: OUT_C × 10 bytes
+示例: 512通道 = 5,120 bytes
 ```
 
 硬件加载后存入 PPU Parameter SRAM，计算时按 ch_idx 索引查询。
@@ -610,12 +611,12 @@ REG(DMA_CTRL)         = 0x00;         // 无转置, burst=4
 
 // 3. 配置后处理 (per-channel requantize + ReLU)
 REG(POST_CTRL)        = (1 << 6)      // BIAS_EN = 1
-                      | (0 << 5)      // ZP_EN = 0 (INT16 symmetric, zp=0)
+                      | (0 << 5)      // ZP_EN = 0 (symmetric, zp=0)
                       | (1 << 2)      // RELU_EN = 1
                       | (1 << 7)      // INT16_OUT = 1
                       | 0x00;         // PPU_MODE = CONV_REQ
 REG(POST_PARAM_ADDR)  = 0x08020000;   // 同 DMA_PARAM_ADDR
-REG(POST_PARAM_COUNT) = 128;          // 128通道参数 = 128×8 = 1024 bytes
+REG(POST_PARAM_COUNT) = 128;          // 128通道参数 = 128×10 = 1280 bytes
 REG(POST_CLAMP)       = (32767 << 16) | (uint16_t)(-32768); // INT16 full range
 REG(POST_ACT_CFG)     = 1;            // ACT_TYPE = ReLU
 
@@ -707,11 +708,11 @@ REG(POST_ACT_CFG) = (4 << 4) // LUT_INPUT_SHIFT=4 (INT16→8-bit index)
 
 ## 10. 设计备注
 
-1. **Per-channel参数加载流程**：CPU配置 POST_PARAM_ADDR 和 POST_PARAM_COUNT 后，NPU 在 START 后自动通过 DMA 将参数加载到片上 Parameter SRAM。参数 SRAM 大小固定为 4KB（支持最多 512 通道），大于 512 通道时需分 tile 处理（Control Unit 自动管理）。
+1. **Per-channel参数加载流程**：CPU配置 POST_PARAM_ADDR 和 POST_PARAM_COUNT 后，NPU 在 START 后自动通过 DMA 将参数加载到片上 Parameter SRAM。参数 SRAM 大小固定为 8KB（支持最多 512 通道 × 10 bytes = 5KB，余量用于对齐），大于 512 通道时需分 tile 处理（Control Unit 自动管理）。
 
-2. **参数 SRAM 生命周期**：每层计算前加载，计算完成后内容失效。下一层开始时重新加载新参数。由于参数量小（128ch = 1KB），加载时间远小于计算时间，不影响性能。
+2. **参数 SRAM 生命周期**：每层计算前加载，计算完成后内容失效。下一层开始时重新加载新参数。由于参数量小（128ch = 1.25KB），加载时间远小于计算时间，不影响性能。
 
-3. **Bias 合并到参数包**：传统设计中 bias 独立存储，本设计将 bias_q 合并到 per-channel 参数包中（8 bytes/ch 内含 32-bit bias），减少一次 DMA 事务，简化控制逻辑。
+3. **Bias 合并到参数包**：传统设计中 bias 独立存储，本设计将 bias_q 合并到 per-channel 参数包中（10 bytes/ch 内含 32-bit bias + 16-bit zp），减少一次 DMA 事务，简化控制逻辑。
 
 4. **Add 节点参数**：Add rescale 参数很少（每个 Add 节点 8 bytes），对于整个模型（12 个 Add 节点 = 96 bytes），可一次性加载或跟随对应层的参数一起加载。
 
