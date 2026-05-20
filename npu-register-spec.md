@@ -306,11 +306,13 @@
 |-----|------|
 | [31:0] | 权重数据在外部SRAM/Flash中的字节地址 |
 
-### 0x10C DMA_BIAS_ADDR — Bias数据基地址 [RW]
+### 0x10C DMA_PARAM_ADDR — Per-channel参数基地址 [RW]
 
 | Bit | 描述 |
 |-----|------|
-| [31:0] | Bias数据地址（INT32, 每输出通道一个） |
+| [31:0] | Per-channel requantize参数（M/S/zp/bias）在外部SRAM的字节地址 |
+
+等价于 POST_PARAM_ADDR (0x184)，两者写任一个均可（硬件共用同一寄存器，双映射便于编程）。
 
 ### 0x110 DMA_IN_STRIDE — 输入数据步长 [RW]
 
@@ -347,17 +349,21 @@
 | [15:8] | XFER_COUNT | 已完成的传输块数 |
 | [31:16] | — | 保留 |
 
-### 0x120 DMA_ELTWISE_ADDR — Eltwise Add第二输入地址 [RW]
+### 0x120 DMA_ADD_B_ADDR — Add节点第二输入地址 [RW]
 
 | Bit | 描述 |
 |-----|------|
-| [31:0] | Eltwise Add操作的第二输入数据地址 |
+| [31:0] | Eltwise Add操作的第二输入（分支B）数据地址 |
 
-### 0x124 DMA_CONCAT_SRC_ADDR — Concat源地址 [RW]
+等价于 POST_ADD_INPUT_ADDR (0x198)，双映射。
+
+### 0x124 DMA_ADD_PARAM_ADDR — Add节点rescale参数地址 [RW]
 
 | Bit | 描述 |
 |-----|------|
-| [31:0] | Concat操作的第二输入源地址 |
+| [31:0] | Add节点的rescale参数 (M_A/S_A/M_B/S_B) 在外部SRAM的地址 |
+
+等价于 POST_ADD_PARAM_ADDR (0x194)，双映射。
 
 ### 0x128 DMA_IN_SIZE — 输入数据总大小 [RW]
 
@@ -377,65 +383,115 @@
 
 ## 6. Group 3：后处理配置 (0x180 - 0x1FF)
 
+Per-channel requantize 参数（M/S/bias/zp）存储在外部 SRAM 中，由 DMA 在每层计算前加载到片上 Parameter SRAM。此组寄存器配置加载地址、参数格式和后处理行为。
+
 ### 0x180 POST_CTRL — 后处理控制寄存器 [RW]
 
 | Bit | 名称 | 复位值 | 描述 |
 |-----|------|--------|------|
-| [0] | BIAS_EN | 0 | 1=启用Bias加法 |
-| [1] | SHIFT_EN | 0 | 1=启用右移 |
-| [2] | SCALE_EN | 0 | 1=启用乘以scale |
-| [3] | CLAMP_EN | 0 | 1=启用clamp截断 |
-| [4] | LUT_EN | 0 | 1=启用LUT激活函数 |
-| [5] | ELTWISE_EN | 0 | 1=启用逐元素加法 |
-| [6] | POOL_EN | 0 | 1=启用后处理中的pooling |
-| [7] | OUT_INT16 | 0 | 1=输出为INT16（默认INT8） |
+| [1:0] | PPU_MODE | 0 | 后处理模式: 0=CONV_REQ, 1=ADD, 2=RELU_ONLY, 3=PASS_THROUGH |
+| [2] | RELU_EN | 0 | 1=在requantize后启用ReLU (max(0,x)) |
+| [3] | RELU6_EN | 0 | 1=ReLU6模式 (clamp to [0, 6×scale]) |
+| [4] | LUT_EN | 0 | 1=启用LUT激活函数（替代ReLU） |
+| [5] | ZP_EN | 0 | 1=启用输出零点加法（INT8 mode） |
+| [6] | BIAS_EN | 0 | 1=启用per-channel bias加法 |
+| [7] | INT16_OUT | 0 | 1=输出为INT16, 0=输出为INT8 |
 | [31:8] | — | 0 | 保留 |
 
-后处理管道执行顺序（固定）：
+后处理管道执行顺序（固定，由硬件pipeline实现）：
 ```
-累加结果(INT32) → +Bias → >>Shift → ×Scale → +ZeroPoint → Clamp → LUT → Eltwise Add → Pool → 输出
+acc(40-bit) → +bias_q[ch] → ×M[ch] → >>S[ch](+round) → +zp[ch] → clamp → ReLU/LUT → out
 ```
 
-### 0x184 POST_SHIFT — 右移量 [RW]
+### 0x184 POST_PARAM_ADDR — Per-channel参数基地址 [RW]
+
+| Bit | 描述 |
+|-----|------|
+| [31:0] | Per-channel requantize参数在外部SRAM的字节地址（8字节对齐） |
+
+DMA 在计算启动前自动将参数加载到片上 Parameter SRAM。
+
+### 0x188 POST_PARAM_COUNT — 参数通道数 [RW]
 
 | Bit | 名称 | 描述 |
 |-----|------|------|
-| [4:0] | SHIFT_BITS | 右移位数 (0-31) |
-| [5] | ROUND_EN | 1=移位时四舍五入（加0.5后移位） |
-| [31:6] | — | 保留 |
-
-### 0x188 POST_SCALE — 缩放因子 [RW]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [15:0] | SCALE | 乘法缩放因子 (INT16, 通常为量化的requant scale) |
+| [15:0] | PARAM_CH_COUNT | 需加载的输出通道数（= OUT_C） |
 | [31:16] | — | 保留 |
 
-### 0x18C POST_ZERO_POINT — 零点偏移 [RW]
+DMA 加载字节数 = PARAM_CH_COUNT × 8 bytes。
+
+### 0x18C POST_CLAMP — Clamp范围 [RW]
 
 | Bit | 名称 | 描述 |
 |-----|------|------|
-| [7:0] | IN_ZERO_POINT | 输入零点 |
-| [15:8] | WEIGHT_ZERO_POINT | 权重零点 |
-| [23:16] | OUT_ZERO_POINT | 输出零点 |
-| [31:24] | — | 保留 |
+| [15:0] | CLAMP_MIN | 最小值 (INT16 signed: -32768~32767; INT8: -128~127) |
+| [31:16] | CLAMP_MAX | 最大值 (INT16: 32767; INT8: 127; ReLU: min=0) |
 
-### 0x190 POST_CLAMP — Clamp范围 [RW]
+### 0x190 POST_ACT_CFG — 激活函数配置 [RW]
+
+| Bit | 名称 | 复位值 | 描述 |
+|-----|------|--------|------|
+| [3:0] | ACT_TYPE | 0 | 激活类型: 0=None, 1=ReLU, 2=ReLU6, 3=LUT, 4-15=保留 |
+| [7:4] | LUT_INPUT_SHIFT | 0 | LUT输入预移位（将INT16缩放到LUT索引范围） |
+| [31:8] | — | 0 | 保留 |
+
+### 0x194 POST_ADD_PARAM_ADDR — Add节点参数地址 [RW]
+
+| Bit | 描述 |
+|-----|------|
+| [31:0] | Add节点rescale参数在外部SRAM的字节地址 |
+
+Add 参数格式（每节点 8 bytes）：
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ byte[0:1] │ M_A[14:0] + reserved[15]                             │
+│ byte[2]   │ S_A[5:0] + reserved[7:6]                             │
+│ byte[3]   │ reserved                                             │
+│ byte[4:5] │ M_B[14:0] + reserved[15]                             │
+│ byte[6]   │ S_B[5:0] + reserved[7:6]                             │
+│ byte[7]   │ reserved                                             │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### 0x198 POST_ADD_INPUT_ADDR — Add节点第二输入地址 [RW]
+
+| Bit | 描述 |
+|-----|------|
+| [31:0] | Add操作的第二输入（分支B）在外部SRAM的字节地址 |
+
+### 0x19C POST_ADD_STRIDE — Add节点第二输入步长 [RW]
 
 | Bit | 名称 | 描述 |
 |-----|------|------|
-| [7:0] | CLAMP_MIN | 最小值 (INT8: -128 to 127) |
-| [15:8] | CLAMP_MAX | 最大值 (INT8: -128 to 127, 如ReLU6时=6) |
+| [15:0] | ADD_IN_STRIDE_ROW | 第二输入相邻行字节间距 |
 | [31:16] | — | 保留 |
 
-### 0x194 POST_BIAS_SHIFT — Bias专用缩放 [RW]
+### 0x1A0 - 0x1FF 保留
 
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [4:0] | BIAS_SHIFT | Bias右移位数（Bias为INT32，需对齐到累加器精度） |
-| [31:5] | — | 保留 |
+---
 
-### 0x198 - 0x1FF 保留
+### Per-Channel 参数内存布局（软件规约）
+
+模型转换工具为每层生成 per-channel 参数数组，存放于外部 SRAM：
+
+```
+基地址: POST_PARAM_ADDR
+
+偏移 (per channel, 8 bytes each):
+┌─────────────────────────────────────────────────────────────────┐
+│  byte offset │ 内容                                              │
+├──────────────┼──────────────────────────────────────────────────┤
+│  [0:1]       │ M[14:0] (15-bit unsigned multiplier, bit15=0)    │
+│  [2]         │ S[5:0]  (6-bit shift amount, bit7:6=0)           │
+│  [3]         │ zp[7:0] (8-bit output zero point, INT16时=0)     │
+│  [4:7]       │ bias_q[31:0] (32-bit signed, little-endian)      │
+└──────────────┴──────────────────────────────────────────────────┘
+
+总大小: OUT_C × 8 bytes
+示例: 512通道 = 4,096 bytes
+```
+
+硬件加载后存入 PPU Parameter SRAM，计算时按 ch_idx 索引查询。
 
 ---
 
@@ -502,86 +558,170 @@
 | 0x100 | DMA_IN_ADDR | RW | 输入数据地址 |
 | 0x104 | DMA_OUT_ADDR | RW | 输出数据地址 |
 | 0x108 | DMA_WEIGHT_ADDR | RW | 权重地址 |
-| 0x10C | DMA_BIAS_ADDR | RW | Bias地址 |
+| 0x10C | DMA_PARAM_ADDR | RW | Per-channel参数地址 (M/S/zp/bias) |
 | 0x110 | DMA_IN_STRIDE | RW | 输入步长(行/通道) |
 | 0x114 | DMA_OUT_STRIDE | RW | 输出步长 |
 | 0x118 | DMA_CTRL | RW | DMA控制(转置/burst/优先级) |
 | 0x11C | DMA_STATUS | RO | DMA状态 |
-| 0x120 | DMA_ELTWISE_ADDR | RW | Eltwise第二输入地址 |
-| 0x124 | DMA_CONCAT_SRC_ADDR | RW | Concat第二源地址 |
+| 0x120 | DMA_ADD_B_ADDR | RW | Add第二输入地址 |
+| 0x124 | DMA_ADD_PARAM_ADDR | RW | Add rescale参数地址 |
 | 0x128 | DMA_IN_SIZE | RW | 输入数据总大小 |
 | 0x12C | DMA_WEIGHT_SIZE | RW | 权重数据总大小 |
-| 0x180 | POST_CTRL | RW | 后处理使能控制 |
-| 0x184 | POST_SHIFT | RW | 右移量 |
-| 0x188 | POST_SCALE | RW | 缩放因子 |
-| 0x18C | POST_ZERO_POINT | RW | 量化零点 |
-| 0x190 | POST_CLAMP | RW | Clamp范围 |
-| 0x194 | POST_BIAS_SHIFT | RW | Bias缩放 |
+| 0x180 | POST_CTRL | RW | 后处理模式/使能控制 |
+| 0x184 | POST_PARAM_ADDR | RW | Per-channel参数基地址 |
+| 0x188 | POST_PARAM_COUNT | RW | 参数通道数 |
+| 0x18C | POST_CLAMP | RW | Clamp范围 (INT8/INT16) |
+| 0x190 | POST_ACT_CFG | RW | 激活函数配置 |
+| 0x194 | POST_ADD_PARAM_ADDR | RW | Add节点rescale参数地址 |
+| 0x198 | POST_ADD_INPUT_ADDR | RW | Add第二输入地址 |
+| 0x19C | POST_ADD_STRIDE | RW | Add第二输入步长 |
 | 0x200-0x3FF | LUT_DATA | RW | 256-entry激活函数查找表 |
 
 ---
 
 ## 9. 典型使用流程
 
-### 9.1 CPU配置一层Conv2D + ReLU的示例
+### 9.1 CPU配置一层Conv2D + ReLU的示例 (INT16 per-channel)
 
 ```c
+// 假设模型转换工具已生成:
+//   - 权重数据 @ 0x08000000 (INT16, NHWC layout)
+//   - per-channel参数 @ 0x08020000 (M/S/zp/bias, 8 bytes/ch)
+//   - 输入激活 @ 0x20000000 (INT16, 前一层输出)
+//   - 输出目标 @ 0x20010000
+
 // 1. 配置层参数
-REG(LAYER_MODE)    = 0x00;          // OP_TYPE=CONV2D, DATA_TYPE=INT8
+REG(LAYER_MODE)    = (1 << 4) | 0x00;  // DATA_TYPE=INT16, OP_TYPE=CONV2D
 REG(IN_DIM_H_W)   = (56 << 16) | 56;  // 56×56输入
-REG(IN_DIM_C)     = 64;             // 64通道输入
+REG(IN_DIM_C)     = 64;               // 64通道输入
 REG(OUT_DIM_H_W)  = (56 << 16) | 56;  // 56×56输出
-REG(OUT_DIM_C)    = 128;            // 128通道输出
+REG(OUT_DIM_C)    = 128;              // 128通道输出
 REG(KERNEL_SIZE)  = (1 << 24) | (1 << 16) | (3 << 8) | 3; // 3×3, dilation=1
-REG(STRIDE)       = (1 << 8) | 1;   // stride=1
+REG(STRIDE)       = (1 << 8) | 1;     // stride=1
 REG(PADDING)      = (1 << 24) | (1 << 16) | (1 << 8) | 1; // pad=1 all sides
 
-// 2. 配置DMA
-REG(DMA_IN_ADDR)     = 0x20000000;  // 输入数据地址
-REG(DMA_OUT_ADDR)    = 0x20010000;  // 输出数据地址
-REG(DMA_WEIGHT_ADDR) = 0x08000000;  // 权重地址(Flash)
-REG(DMA_BIAS_ADDR)   = 0x08020000;  // Bias地址
-REG(DMA_CTRL)        = 0x00;        // 无转置, burst=4
+// 2. 配置DMA地址
+REG(DMA_IN_ADDR)      = 0x20000000;   // 输入激活地址
+REG(DMA_OUT_ADDR)     = 0x20010000;   // 输出目标地址
+REG(DMA_WEIGHT_ADDR)  = 0x08000000;   // 权重地址
+REG(DMA_PARAM_ADDR)   = 0x08020000;   // per-channel参数地址 (M/S/zp/bias)
+REG(DMA_IN_STRIDE)    = (56 * 64 * 2); // row stride = W × C_in × 2B
+REG(DMA_CTRL)         = 0x00;         // 无转置, burst=4
 
-// 3. 配置后处理 (ReLU = clamp min=0)
-REG(POST_CTRL)    = (1<<3) | (1<<1) | (1<<0); // CLAMP_EN + SHIFT_EN + BIAS_EN
-REG(POST_SHIFT)   = 8 | (1<<5);    // 右移8位, 带四舍五入
-REG(POST_SCALE)   = 1;             // scale=1 (已在shift中处理)
-REG(POST_CLAMP)   = (127 << 8) | 0; // clamp to [0, 127] = ReLU
+// 3. 配置后处理 (per-channel requantize + ReLU)
+REG(POST_CTRL)        = (1 << 6)      // BIAS_EN = 1
+                      | (0 << 5)      // ZP_EN = 0 (INT16 symmetric, zp=0)
+                      | (1 << 2)      // RELU_EN = 1
+                      | (1 << 7)      // INT16_OUT = 1
+                      | 0x00;         // PPU_MODE = CONV_REQ
+REG(POST_PARAM_ADDR)  = 0x08020000;   // 同 DMA_PARAM_ADDR
+REG(POST_PARAM_COUNT) = 128;          // 128通道参数 = 128×8 = 1024 bytes
+REG(POST_CLAMP)       = (32767 << 16) | (uint16_t)(-32768); // INT16 full range
+REG(POST_ACT_CFG)     = 1;            // ACT_TYPE = ReLU
 
 // 4. 启动
 REG(NPU_CTRL) = 0x01;  // START
 
 // 5. 等待完成
 while (!(REG(NPU_IRQ_STATUS) & 0x01));  // 等DONE_IRQ
-REG(NPU_IRQ_STATUS) = 0x01;  // 清中断
+REG(NPU_IRQ_STATUS) = 0x01;            // 写1清中断
 ```
 
-### 9.2 Sigmoid激活（通过LUT）
+### 9.2 Eltwise Add (残差连接) 示例
 
 ```c
-// 预计算sigmoid LUT: LUT[i] = sigmoid((i-128)/scale) 量化到INT8
-for (int i = 0; i < 64; i++) {
-    uint32_t packed = lut_values[i*4]
-                    | (lut_values[i*4+1] << 8)
-                    | (lut_values[i*4+2] << 16)
-                    | (lut_values[i*4+3] << 24);
+// Add: out = rescale_A(branch_A) + rescale_B(branch_B)
+// 两路输入scale不同, 需各自rescale到输出scale
+
+// 层参数 (Add是element-wise, 输入输出尺寸相同)
+REG(LAYER_MODE)    = (1 << 4) | 0x04;  // INT16, OP_TYPE=ELTWISE_ADD
+REG(IN_DIM_H_W)   = (14 << 16) | 14;
+REG(IN_DIM_C)     = 256;
+REG(OUT_DIM_H_W)  = (14 << 16) | 14;
+REG(OUT_DIM_C)    = 256;
+
+// DMA: 分支A的输入地址 (主输入)
+REG(DMA_IN_ADDR)      = 0x20000000;   // branch A 数据
+REG(DMA_OUT_ADDR)     = 0x20008000;   // 输出目标
+
+// Add 专用配置
+REG(POST_ADD_INPUT_ADDR) = 0x20004000;   // branch B 数据地址
+REG(POST_ADD_PARAM_ADDR) = 0x08030000;   // Add rescale参数 (M_A/S_A/M_B/S_B)
+REG(POST_ADD_STRIDE)     = 14 * 256 * 2; // branch B row stride
+
+// 后处理: Add mode + ReLU
+REG(POST_CTRL)  = (1 << 2)   // RELU_EN
+                | (1 << 7)   // INT16_OUT
+                | 0x01;      // PPU_MODE = ADD
+REG(POST_CLAMP) = (32767 << 16) | (uint16_t)(-32768);
+REG(POST_ACT_CFG) = 1;      // ReLU
+
+// 启动
+REG(NPU_CTRL) = 0x01;
+while (!(REG(NPU_IRQ_STATUS) & 0x01));
+REG(NPU_IRQ_STATUS) = 0x01;
+```
+
+### 9.3 INT8 模式 Conv2D (per-channel scale+zp)
+
+```c
+// INT8 模式: 非对称量化, 每通道有独立 zp
+REG(LAYER_MODE)    = 0x00;            // DATA_TYPE=INT8, OP_TYPE=CONV2D
+REG(OUT_DIM_C)    = 128;
+
+// 后处理: per-channel requantize with zero-point
+REG(POST_CTRL)    = (1 << 6)          // BIAS_EN
+                  | (1 << 5)          // ZP_EN = 1 (INT8 needs zp)
+                  | (1 << 2)          // RELU_EN
+                  | (0 << 7)          // INT16_OUT = 0 (INT8 output)
+                  | 0x00;             // CONV_REQ mode
+REG(POST_PARAM_ADDR)  = 0x08040000;  // INT8 per-channel参数
+REG(POST_PARAM_COUNT) = 128;
+REG(POST_CLAMP) = (127 << 16) | (uint16_t)(-128); // INT8 range
+
+// ... 其余同 9.1
+REG(NPU_CTRL) = 0x01;
+```
+
+### 9.4 Sigmoid激活（通过LUT）
+
+```c
+// 预计算sigmoid LUT: 256 entries, INT16 mode
+// LUT[i] = quantize(sigmoid(dequantize(i)))
+for (int i = 0; i < 128; i++) {
+    uint32_t packed = (uint16_t)lut_values[i*2]
+                    | ((uint32_t)(uint16_t)lut_values[i*2+1] << 16);
     REG(0x200 + i*4) = packed;
 }
 
-// 后处理启用LUT
-REG(POST_CTRL) = (1<<4) | (1<<3) | (1<<1); // LUT_EN + CLAMP_EN + SHIFT_EN
+// 后处理: requantize → LUT (替代ReLU)
+REG(POST_CTRL)    = (1 << 6)  // BIAS_EN
+                  | (1 << 4)  // LUT_EN
+                  | (1 << 7)  // INT16_OUT
+                  | 0x00;     // CONV_REQ
+REG(POST_ACT_CFG) = (4 << 4) // LUT_INPUT_SHIFT=4 (INT16→8-bit index)
+                   | 3;       // ACT_TYPE = LUT
 ```
 
 ---
 
 ## 10. 设计备注
 
-1. **Tiling由控制单元硬件处理**：CPU只需配置一次完整层参数，Control Unit内部根据TILE_CFG自动循环处理所有tile，ping-pong切换自动管理。
+1. **Per-channel参数加载流程**：CPU配置 POST_PARAM_ADDR 和 POST_PARAM_COUNT 后，NPU 在 START 后自动通过 DMA 将参数加载到片上 Parameter SRAM。参数 SRAM 大小固定为 4KB（支持最多 512 通道），大于 512 通道时需分 tile 处理（Control Unit 自动管理）。
 
-2. **AUTO_NEXT模式**：如果配置了层描述符链表（存在外部SRAM），NPU可以自动加载下一层配置，无需CPU每层干预。V1.0可先不实现，每层手动配置。
+2. **参数 SRAM 生命周期**：每层计算前加载，计算完成后内容失效。下一层开始时重新加载新参数。由于参数量小（128ch = 1KB），加载时间远小于计算时间，不影响性能。
 
-3. **性能计数器**：NPU_PERF_CNT和NPU_MAC_CNT用于性能分析和利用率计算：
+3. **Bias 合并到参数包**：传统设计中 bias 独立存储，本设计将 bias_q 合并到 per-channel 参数包中（8 bytes/ch 内含 32-bit bias），减少一次 DMA 事务，简化控制逻辑。
+
+4. **Add 节点参数**：Add rescale 参数很少（每个 Add 节点 8 bytes），对于整个模型（12 个 Add 节点 = 96 bytes），可一次性加载或跟随对应层的参数一起加载。
+
+5. **Tiling由控制单元硬件处理**：CPU只需配置一次完整层参数，Control Unit内部根据TILE_CFG自动循环处理所有tile，ping-pong切换自动管理。
+
+6. **AUTO_NEXT模式**：如果配置了层描述符链表（存在外部SRAM），NPU可以自动加载下一层配置，无需CPU每层干预。V1.0可先不实现，每层手动配置。
+
+7. **性能计数器**：NPU_PERF_CNT和NPU_MAC_CNT用于性能分析和利用率计算：
    - 利用率 = MAC_COUNT / (CYCLE_COUNT × ARRAY_SIZE²)
 
-4. **LUT填充时机**：LUT数据在NPU空闲时写入，不能在计算过程中修改。如果相邻层激活函数不同，需在层间切换时更新LUT。
+8. **LUT填充时机**：LUT数据在NPU空闲时写入，不能在计算过程中修改。如果相邻层激活函数不同，需在层间切换时更新LUT。
+
+9. **双映射寄存器**：DMA_PARAM_ADDR 与 POST_PARAM_ADDR、DMA_ADD_B_ADDR 与 POST_ADD_INPUT_ADDR 等为同一物理寄存器的双地址映射，方便驱动在配置 DMA 组或后处理组时就近访问。
