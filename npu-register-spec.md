@@ -421,7 +421,7 @@ DMA 在计算启动前自动将参数加载到片上 Parameter SRAM。
 | [15:0] | PARAM_CH_COUNT | 需加载的输出通道数（= OUT_C） |
 | [31:16] | — | 保留 |
 
-DMA 加载字节数 = PARAM_CH_COUNT × 10 bytes。
+DMA 加载字节数 = PARAM_CH_COUNT × 14 bytes。
 
 ### 0x18C POST_CLAMP — Clamp范围 [RW]
 
