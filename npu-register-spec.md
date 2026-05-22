@@ -330,6 +330,9 @@
 
 ### 0x118 DMA_CTRL — DMA控制寄存器 [RW]
 
+> **注意**：此寄存器是 RTL 硬件 DMA 引擎的配置 CSR，与离线模型 descriptor 中的 `sched_ctrl` 字段无关。
+> 离线模型格式的调度控制位（DB_EN、FUSE_*）定义见 `design/interface-spec.md` §4。
+
 | Bit | 名称 | 复位值 | 描述 |
 |-----|------|--------|------|
 | [0] | TRANSPOSE_EN | 0 | 1=搬运时做NCHW→NHWC转置 |
@@ -477,7 +480,7 @@ Add 参数格式（每节点 8 bytes）：
 ```
 基地址: POST_PARAM_ADDR
 
-偏移 (per channel, 10 bytes each):
+偏移 (per channel, 14 bytes each):
 ┌─────────────────────────────────────────────────────────────────┐
 │  byte offset │ 内容                                              │
 ├──────────────┼──────────────────────────────────────────────────┤
@@ -485,11 +488,11 @@ Add 参数格式（每节点 8 bytes）：
 │  [2]         │ S[5:0]  (6-bit shift amount, bit7:6=0)           │
 │  [3]         │ reserved (0x00)                                   │
 │  [4:5]       │ zp[15:0] (16-bit signed output zero point)       │
-│  [6:9]       │ bias_q[31:0] (32-bit signed, little-endian)      │
+│  [6:13]      │ bias_q[63:0] (64-bit signed, little-endian)      │
 └──────────────┴──────────────────────────────────────────────────┘
 
-总大小: OUT_C × 10 bytes
-示例: 512通道 = 5,120 bytes
+总大小: OUT_C × 14 bytes
+示例: 512通道 = 7,168 bytes
 ```
 
 硬件加载后存入 PPU Parameter SRAM，计算时按 ch_idx 索引查询。
@@ -708,15 +711,15 @@ REG(POST_ACT_CFG) = (4 << 4) // LUT_INPUT_SHIFT=4 (INT16→8-bit index)
 
 ## 10. 设计备注
 
-1. **Per-channel参数加载流程**：CPU配置 POST_PARAM_ADDR 和 POST_PARAM_COUNT 后，NPU 在 START 后自动通过 DMA 将参数加载到片上 Parameter SRAM。参数 SRAM 大小固定为 8KB（支持最多 512 通道 × 10 bytes = 5KB，余量用于对齐），大于 512 通道时需分 tile 处理（Control Unit 自动管理）。
+1. **Per-channel参数加载流程**：CPU配置 POST_PARAM_ADDR 和 POST_PARAM_COUNT 后，NPU 在 START 后自动通过 DMA 将参数加载到片上 Parameter SRAM。参数 SRAM 大小固定为 8KB（支持最多 512 通道 × 14 bytes = 7KB，余量用于对齐），大于 512 通道时需分 tile 处理（Control Unit 自动管理）。
 
 2. **参数 SRAM 生命周期**：每层计算前加载，计算完成后内容失效。下一层开始时重新加载新参数。由于参数量小（128ch = 1.25KB），加载时间远小于计算时间，不影响性能。
 
-3. **Bias 合并到参数包**：传统设计中 bias 独立存储，本设计将 bias_q 合并到 per-channel 参数包中（10 bytes/ch 内含 32-bit bias + 16-bit zp），减少一次 DMA 事务，简化控制逻辑。
+3. **Bias 合并到参数包**：传统设计中 bias 独立存储，本设计将 bias_q 合并到 per-channel 参数包中（14 bytes/ch 内含 64-bit bias + 16-bit zp），减少一次 DMA 事务，简化控制逻辑。使用 int64 bias 是因为 INT8 量化大通道卷积的 bias 累加精度需要。
 
 4. **Add 节点参数**：Add rescale 参数很少（每个 Add 节点 8 bytes），对于整个模型（12 个 Add 节点 = 96 bytes），可一次性加载或跟随对应层的参数一起加载。
 
-5. **Tiling由控制单元硬件处理**：CPU只需配置一次完整层参数，Control Unit内部根据TILE_CFG自动循环处理所有tile，ping-pong切换自动管理。
+5. **Tiling由离线编译器计算**：编译器（`tools/tiling.py`）根据SRAM预算计算最优tile尺寸，结果写入layer descriptor的tile_h/tile_w/tile_num_h/tile_num_w字段。Control Unit按descriptor指定的tile参数执行循环，不自行推导tile尺寸。CPU每层配置一次完整参数，ping-pong切换由Control Unit管理。
 
 6. **AUTO_NEXT模式**：如果配置了层描述符链表（存在外部SRAM），NPU可以自动加载下一层配置，无需CPU每层干预。V1.0可先不实现，每层手动配置。
 
