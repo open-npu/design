@@ -282,7 +282,19 @@
 | [15:0] | TILE_NUM_H | 垂直方向tile数量 |
 | [31:16] | TILE_NUM_W | 水平方向tile数量 |
 
-### 0x078 - 0x0FF 保留
+### 0x078 SRAM_BASE — 片上SRAM基地址 [RW]
+
+| Bit | 名称 | 复位值 | 描述 |
+|-----|------|--------|------|
+| [12:0] | ACT_BASE | 0 | 输入激活在片上Activation SRAM中的字地址偏移 |
+| [15:13] | — | 0 | 保留 |
+| [28:16] | OUT_BASE | 0 | 输出在片上Activation SRAM中的字地址偏移 |
+| [31:29] | — | 0 | 保留 |
+
+用于分离输入/输出在同一Activation SRAM中的存储区域，防止计算过程中输出覆盖输入数据。
+当设为0时输入输出共用地址0起始（向后兼容，适用于out_base在DMA阶段确定的场景）。
+
+### 0x07C - 0x0FF 保留
 
 ---
 
@@ -380,7 +392,13 @@
 |-----|------|
 | [31:0] | 当前层权重总字节数 |
 
-### 0x130 - 0x17F 保留
+### 0x130 DMA_OUT_SIZE — 输出数据总大小 [RW]
+
+| Bit | 描述 |
+|-----|------|
+| [31:0] | 当前层输出数据总字节数 |
+
+### 0x134 - 0x17F 保留
 
 ---
 
@@ -559,6 +577,7 @@ Add 参数格式（每节点 8 bytes）：
 | 0x06C | CONCAT_CFG | RW | Concat配置 |
 | 0x070 | TILE_CFG | RW | 当前Tile尺寸 |
 | 0x074 | TILE_COUNT | RW | Tile数量 |
+| 0x078 | SRAM_BASE | RW | 片上SRAM输入/输出基地址 |
 | 0x100 | DMA_IN_ADDR | RW | 输入数据地址 |
 | 0x104 | DMA_OUT_ADDR | RW | 输出数据地址 |
 | 0x108 | DMA_WEIGHT_ADDR | RW | 权重地址 |
@@ -571,6 +590,7 @@ Add 参数格式（每节点 8 bytes）：
 | 0x124 | DMA_ADD_PARAM_ADDR | RW | Add rescale参数地址 |
 | 0x128 | DMA_IN_SIZE | RW | 输入数据总大小 |
 | 0x12C | DMA_WEIGHT_SIZE | RW | 权重数据总大小 |
+| 0x130 | DMA_OUT_SIZE | RW | 输出数据总大小 |
 | 0x180 | POST_CTRL | RW | 后处理模式/使能控制 |
 | 0x184 | POST_PARAM_ADDR | RW | Per-channel参数基地址 |
 | 0x188 | POST_PARAM_COUNT | RW | 参数通道数 |
