@@ -1227,7 +1227,7 @@ Prefetch 控制信号:
 │  POOLING (avg/max)      → Pooling Logic (复用PPU datapath)  │
 │  ADD (element-wise)     → PPU (ADD mode, bypass SA)        │
 │  RELU_ONLY              → PPU (RELU_ONLY mode)             │
-│  RESIZE (nearest)       → DMA address stride trick         │
+│  RESIZE (nearest/bilinear) → Resize FSM + PPU + RMW WB    │
 │  CONCAT                 → DMA only (重排写地址)             │
 └────────────────────────────────────────────────────────────┘
 
