@@ -1975,6 +1975,7 @@ PPU 总面积 = 16 × 550 = ~8,800 LUT，占整芯片 ~6%。
 | DMA E2E INT16 | 10层 MobileNetV2-Tiny，DMA 端到端 | bit-exact PASS |
 | Spatial Tiling | 32×32 输入, 6层, 多种 tiling 配置 | bit-exact PASS |
 | **AllOps-Mini** | **18层全模型, 7种算子, 16×16 输入** | **bit-exact PASS** |
+| **AllOps-128** | **18层全模型, 22次调用, 128×128 输入, DMA tiling** | **bit-exact PASS** |
 
 ### 14.3 AllOps-Mini 全模型测试架构
 
@@ -2002,6 +2003,33 @@ Layer 17: Conv2D   2×2×16    → 1×1×8      k=2 s=1 pad=0
 ```
 
 覆盖特征：残差加法、Concat 跳跃连接、stride-2 下采样、GlobalAvgPool、Deconv 上采样、通道扩展 (3→48) 与压缩 (48→8)。
+
+### 14.4 AllOps-128 全模型测试架构
+
+AllOps-128 是基于 AllOps-Mini 拓扑的 128×128 输入版本，用于验证 DMA 空间分块 (spatial tiling) 与较大计算规模下的正确性。通道数经过重新设计（8→8→32→40→16→8），确保仅 Conv2D 和 DWConv（已支持 tiling）的层超出 SRAM 容量，其余层均在片上完成。
+
+```
+Layer  0: Conv2D  128×128×3  → 64×64×8    k=3 s=2  [TILED: 4 tiles]
+Layer  1: DWConv   64×64×8  → 32×32×8    k=3 s=2  [TILED: 2 tiles]
+Layer  2: Conv2D   32×32×8  → 32×32×8    k=1 s=1  [residual save]
+Layer  3: DWConv   32×32×8  → 32×32×8    k=3 s=1
+Layer  4: Conv2D   32×32×8  → 32×32×8    k=1 s=1
+Layer  5: Add      32×32×8               (L2 + L4 残差连接)
+Layer  6: DWConv   32×32×8  → 16×16×8    k=3 s=2
+Layer  7: Conv2D   16×16×8  → 16×16×32   k=1 s=1  [concat save]
+Layer  8: Pooling  16×16×32 → 8×8×32     MaxPool k=2 s=2
+Layer  9: Conv2D    8×8×32  → 8×8×32     k=1 s=1
+Layer 10: Resize    8×8×32  → 16×16×32   nearest 2×
+Layer 11: Conv2D   16×16×32 → 16×16×8    k=1 s=1
+Layer 12: Concat   16×16×8  (branch A)   offset=0, total_c=40
+Layer 13: Concat   16×16×32 (branch B)   offset=8, total_c=40
+Layer 14: Conv2D   16×16×40 → 8×8×16     k=3 s=2  [k_depth=360, 23 passes]
+Layer 15: Pooling    8×8×16 → 1×1×16     GlobalAvgPool
+Layer 16: Deconv     1×1×16 → 2×2×16     k=2 s=2
+Layer 17: Conv2D     2×2×16 → 1×1×8      k=2 s=1 pad=0
+```
+
+共 22 次硬件调用 (L0 拆分为 4 tile + L1 拆分为 2 tile + 16 个非 tiling 层)。验证环境：Verilator 5.036, 89.9M ns 仿真时间, ~8 分钟壁钟时间 (~183K ns/s)。
 
 ---
 

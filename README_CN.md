@@ -46,6 +46,7 @@ Open-NPU 神经网络加速器的硬件架构与接口规格文档。
 | Spatial Tiling E2E (32×32 输入, 6 层) | 所有 tiling 变体 | 通过 |
 | 独立算子 E2E (Pooling, Add, Resize, Deconv, Concat) | 15+ 测试 | 全部通过 |
 | **AllOps-Mini 全模型** (18 层, 7 种算子, 16×16 输入) | **端到端 bit-exact** | **通过** |
+| **AllOps-128 全模型** (18 层, 22 次调用, 128×128 输入) | **E2E bit-exact + DMA tiling** | **通过** |
 
 ## 相关仓库
 
