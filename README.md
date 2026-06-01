@@ -48,6 +48,19 @@ All 8 CNN operator types are implemented in synthesizable Verilog and verified b
 | **AllOps-Mini full model** (18 layers, 7 op types, 16×16 input) | **End-to-end bit-exact** | **PASS** |
 | **AllOps-128 full model** (18 layers, 22 invocations, 128×128 input) | **E2E bit-exact + DMA tiling** | **PASS** |
 
+## Synthesis Results (Yosys Generic)
+
+Yosys 0.65 generic synthesis (`synth -top npu_top`, ARRAY_SIZE=16, SPAD_KB=128):
+
+| Resource | Count |
+|----------|-------|
+| Logic cells (AND/OR/XOR/NOT/MUX) | 846,550 |
+| Flip-flops (DFF) | 38,346 |
+| Memory blocks | 3 (ACT 32KB + WGT 64KB + PARAM 8KB = 104KB) |
+| Synthesis time | 258s, 4.17 GB peak |
+
+Estimated FPGA fit (Artix-7 XC7A100T): ~30% FF, ~43% BRAM, LUT needs further optimization or a larger device.
+
 ## Related Repositories
 
 - [open-npu/rtl](https://github.com/open-npu/rtl) — Synthesizable Verilog implementation

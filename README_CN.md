@@ -48,6 +48,19 @@ Open-NPU 神经网络加速器的硬件架构与接口规格文档。
 | **AllOps-Mini 全模型** (18 层, 7 种算子, 16×16 输入) | **端到端 bit-exact** | **通过** |
 | **AllOps-128 全模型** (18 层, 22 次调用, 128×128 输入) | **E2E bit-exact + DMA tiling** | **通过** |
 
+## 综合结果 (Yosys Generic)
+
+Yosys 0.65 generic 综合 (`synth -top npu_top`, ARRAY_SIZE=16, SPAD_KB=128)：
+
+| 资源 | 数量 |
+|------|------|
+| 逻辑门 (AND/OR/XOR/NOT/MUX) | 846,550 |
+| 触发器 (DFF) | 38,346 |
+| 存储块 | 3 (ACT 32KB + WGT 64KB + PARAM 8KB = 104KB) |
+| 综合耗时 | 258s, 峰值内存 4.17 GB |
+
+FPGA 适配估算 (Artix-7 XC7A100T)：FF ~30%, BRAM ~43%, LUT 需进一步优化或使用更大器件。
+
 ## 相关仓库
 
 - [open-npu/rtl](https://github.com/open-npu/rtl) — 可综合 Verilog 实现

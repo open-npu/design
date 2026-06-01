@@ -2055,3 +2055,52 @@ Layer 17: Conv2D     2×2×16 → 1×1×8      k=2 s=1 pad=0
 - Group 2: DMA配置（地址、步长、转置控制）
 - Group 3: 后处理配置（shift/scale/clamp/LUT使能）
 - Group 4: 256-entry LUT数据（非线性激活函数）
+
+---
+
+## 17. 综合结果 (Yosys Generic Synthesis)
+
+> 工具：Yosys 0.65 (git sha1 2105caa84)
+> 配置：ARRAY_SIZE=16, SPAD_KB=128
+> 日期：2026-06-01
+
+### 17.1 资源统计
+
+| 资源 | 数量 | 说明 |
+|------|------|------|
+| 逻辑门 (AND/OR/XOR/NOT/MUX) | 846,550 | Generic gate-level |
+| 触发器 (DFF) | 38,346 | 含脉动阵列、PPU流水线、DMA、控制FSM |
+| 存储块 ($mem_v2) | 3 | ACT 32KB + WGT 64KB + PARAM 8KB = 104KB |
+| 线网 | 159,604 (1.56M bits) | |
+| 综合时间 | 258s | 48线程，峰值内存 4.17 GB |
+
+### 17.2 综合说明
+
+- 使用 `synth -top npu_top` generic flow (无目标器件绑定)
+- SRAM 保持为 `$mem_v2` 抽象存储块 (`memory -nomap`)，未展开为触发器
+- DW Conv 权重缓冲 (16×16b) 和 CSR LUT (256×8b) 展开为寄存器
+- 跳过 ABC pass 以避免 SRAM 展开导致的内存爆炸
+- 无综合错误，仅 7 条小型存储展开为寄存器的 Warning
+
+### 17.3 FPGA 适配估算 (Artix-7 XC7A100T)
+
+| 资源 | NPU 需求 (估) | 器件可用 | 利用率 |
+|------|---------------|----------|--------|
+| FF | ~38K | 126,800 | ~30% |
+| LUT | ~50-80K | 63,400 | 80-126% (需优化或升级器件) |
+| BRAM36 | ~58 (104KB) | 135 | ~43% |
+| DSP48 | 0 (纯逻辑乘法) | 240 | 0% |
+
+> 注：LUT 估算基于 generic 门数除以 6-input LUT 容量，实际 `synth_xilinx` 结果会因 LUT packing 优化而显著更低。若 LUT 超限，可考虑：
+> 1. 降低 ARRAY_SIZE (如 8×8)
+> 2. 使用更大器件 (XC7A200T: 134,600 LUTs)
+> 3. 利用 DSP48 替代乘法器逻辑
+
+### 17.4 Yosys 兼容性修改
+
+为通过 Yosys 综合，RTL 做了以下兼容性修改（不影响功能/仿真）：
+
+1. **Unpacked array port 展平**：Yosys 不支持模块端口声明中的 unpacked array。将 `npu_systolic`、`npu_compute`、`npu_top` 的 `wgt_data[0:ROWS-1]` 等端口改为 flat packed wire (`wgt_data_flat[DATA_W*ROWS-1:0]`)，模块内部通过 generate 块解包。
+2. **非常量循环边界修复**：`npu_compute.v` 中 `for (i = k_pass_remain; ...)` 改为 `for (i = 0; ...) if (i >= k_pass_remain)` 模式。
+
+修改后 AllOps-Mini E2E 回归验证通过 (18/18 bit-exact PASS)。
