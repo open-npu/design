@@ -47,6 +47,7 @@ All 8 CNN operator types are implemented in synthesizable Verilog and verified b
 | Individual operator E2E (Pooling, Add, Resize, Deconv, Concat) | 15+ tests | All PASS |
 | **AllOps-Mini full model** (18 layers, 7 op types, 16×16 input) | **End-to-end bit-exact** | **PASS** |
 | **AllOps-128 full model** (18 layers, 22 invocations, 128×128 input) | **E2E bit-exact + DMA tiling** | **PASS** |
+| **INT16 full regression** (10 tests, all 7 op types + AllOps-Mini INT16) | **10/10 bit-exact** | **PASS** |
 
 ## Synthesis Results (Yosys `synth_xilinx`)
 

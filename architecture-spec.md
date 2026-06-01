@@ -2,7 +2,7 @@
 
 > 版本：V1.1
 > 日期：2026-06-01
-> 状态：全算子 RTL 验证完成
+> 状态：全算子 RTL 验证完成 + INT16 全链路回归通过
 
 ---
 
@@ -1960,7 +1960,7 @@ PPU 总面积 = 16 × 550 = ~8,800 LUT，占整芯片 ~6%。
 | 0 | Conv2D (1×1, 3×3) | Systolic Array | ✅ | ✅ | 10+ |
 | 1 | DWConv (任意kernel) | DW Conv Module | ✅ | ✅ | 6+ |
 | 2 | FC | 复用 Conv2D | ✅ | ✅ | 2+ |
-| 3 | Pooling (Max/Avg/Global) | Pooling FSM | ✅ | ✅ | 3 |
+| 3 | Pooling (Max/Avg/Global) | Pooling FSM | ✅ | ✅ | 4 |
 | 4 | Eltwise Add | Add FSM + dual rescale | ✅ | ✅ | 3 |
 | 5 | Resize (nearest/bilinear) | Resize FSM | ✅ | ✅ | 4 |
 | 6 | Deconv (2×2/3×3) | Conv2D + zero-insert | ✅ | ✅ | 4 |
@@ -1976,6 +1976,7 @@ PPU 总面积 = 16 × 550 = ~8,800 LUT，占整芯片 ~6%。
 | Spatial Tiling | 32×32 输入, 6层, 多种 tiling 配置 | bit-exact PASS |
 | **AllOps-Mini** | **18层全模型, 7种算子, 16×16 输入** | **bit-exact PASS** |
 | **AllOps-128** | **18层全模型, 22次调用, 128×128 输入, DMA tiling** | **bit-exact PASS** |
+| **INT16 全链路回归** | **10 项 INT16 测试, 覆盖全部 7 种算子** | **10/10 PASS** |
 
 ### 14.3 AllOps-Mini 全模型测试架构
 
@@ -2030,6 +2031,25 @@ Layer 17: Conv2D     2×2×16 → 1×1×8      k=2 s=1 pad=0
 ```
 
 共 22 次硬件调用 (L0 拆分为 4 tile + L1 拆分为 2 tile + 16 个非 tiling 层)。验证环境：Verilator 5.036, 89.9M ns 仿真时间, ~8 分钟壁钟时间 (~183K ns/s)。
+
+### 14.5 INT16 全链路回归测试
+
+INT16 数据通路全链路回归验证，确认 PE 16×16 MAC、npu_compute cfg_int16 双路逻辑、PPU INT16 clamp [-32768, 32767] 以及 DMA 透明传输均正确工作。全部 10 项测试在 Verilator 5.036 下通过。
+
+| 测试 | 描述 | 结果 | 仿真时间 |
+|------|------|------|----------|
+| test_dma_e2e_single_layer_int16 | Conv2D 1×1, INT16 | PASS | 217K ns |
+| test_dma_e2e_single_dw_int16 | DWConv, INT16 | PASS | 203K ns |
+| test_dma_e2e_mobilenet_int16 | 10层 MobileNetV2-Tiny, INT16 | PASS | 3.6M ns |
+| test_dma_e2e_tiling_int16 | 32×32 6层, 空间分块, INT16 | PASS | 42.9M ns |
+| test_add_int16 | Eltwise Add, INT16 | PASS | 17K ns |
+| test_resize_nearest_int16 | Resize nearest 2×, INT16 | PASS | 46K ns |
+| test_deconv_int16 | Deconv 2×2 stride 2, INT16 | PASS | 172K ns |
+| test_concat_int16 | Concat 2-branch, INT16 | PASS | 30K ns |
+| test_pool_max_int16 | MaxPool 2×2 stride 2, INT16 | PASS | 17K ns |
+| test_full_model_allops_int16 | AllOps-Mini 18层全模型, INT16 | PASS | 5.2M ns |
+
+AllOps-Mini INT16 全模型覆盖与 INT8 版本相同的拓扑结构（§14.3），但元素宽度为 2 字节、激活/权重范围 [-32768, 32767]。总仿真时间 267s，~194K ns/s throughput。
 
 ---
 
