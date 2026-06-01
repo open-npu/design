@@ -48,18 +48,26 @@ All 8 CNN operator types are implemented in synthesizable Verilog and verified b
 | **AllOps-Mini full model** (18 layers, 7 op types, 16×16 input) | **End-to-end bit-exact** | **PASS** |
 | **AllOps-128 full model** (18 layers, 22 invocations, 128×128 input) | **E2E bit-exact + DMA tiling** | **PASS** |
 
-## Synthesis Results (Yosys Generic)
+## Synthesis Results (Yosys `synth_xilinx`)
 
-Yosys 0.65 generic synthesis (`synth -top npu_top`, ARRAY_SIZE=16, SPAD_KB=128):
+Yosys 0.65 Xilinx 7-series synthesis (`synth_xilinx -top npu_top -family xc7`, ARRAY_SIZE=16, SPAD_KB=128):
 
 | Resource | Count |
 |----------|-------|
-| Logic cells (AND/OR/XOR/NOT/MUX) | 846,550 |
-| Flip-flops (DFF) | 38,346 |
-| Memory blocks | 3 (ACT 32KB + WGT 64KB + PARAM 8KB = 104KB) |
-| Synthesis time | 258s, 4.17 GB peak |
+| LUT (total) | 52,804 |
+| FF (flip-flops) | 39,145 |
+| BRAM36E1 | 26 (104KB SRAM) |
+| DSP48E1 | 333 |
+| CARRY4 | 8,022 |
+| Estimated Logic Cells | 43,726 |
 
-Estimated FPGA fit (Artix-7 XC7A100T): ~30% FF, ~43% BRAM, LUT needs further optimization or a larger device.
+Recommended FPGA targets:
+
+| Device | LUT Utilization | Fit? |
+|--------|----------------|------|
+| XC7A200T (Artix-7) | 39% | **Best value** |
+| XC7K160T (Kintex-7) | 52% | High frequency |
+| XC7Z045 (Zynq) | 24% | ARM SoC integrated |
 
 ## Related Repositories
 
