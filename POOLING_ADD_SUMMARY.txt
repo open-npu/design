@@ -1,0 +1,325 @@
+================================================================================
+OPEN-NPU POOLING AND ADD OPERATORS - KEY FINDINGS SUMMARY
+================================================================================
+Date: 2026-05-29
+Analysis: Comprehensive architecture specification review
+
+================================================================================
+1. POOLING OPERATOR (OP_TYPE = 3)
+================================================================================
+
+HARDWARE ARCHITECTURE:
+  - Path: Dedicated Pooling Logic (NOT Systolic Array)
+  - Reuses PPU datapath for requantization after pooling computation
+  - Modes: Max Pool (0) or Average Pool (1)
+  - Data Types: INT8 and INT16 fully supported
+
+KEY CONFIGURATION REGISTERS:
+  
+  LAYER_MODE (0x040):
+    - OP_TYPE[3:0] = 3 (identifies pooling)
+    - DATA_TYPE[4] = 0 (INT8) or 1 (INT16)
+
+  POOL_CFG (0x060) - Core pooling parameters:
+    - POOL_MODE[0]: 0=Max, 1=Avg
+    - POOL_H[7:4] / POOL_W[11:8]: Window dimensions (1-15)
+    - POOL_STRIDE_H[15:12] / POOL_STRIDE_W[19:16]: Strides (1-15)
+    - GLOBAL_POOL[20]: 1=Global pooling (ignores window size)
+
+  INPUT/OUTPUT DIMENSIONS:
+    - IN_DIM_H_W (0x044): Input H×W
+    - OUT_DIM_H_W (0x04C): Output H×W
+    - IN/OUT_DIM_C (0x048/0x050): Channels (same for pooling)
+
+  DMA CONFIGURATION:
+    - DMA_IN_ADDR (0x100): Input feature map base
+    - DMA_OUT_ADDR (0x104): Output feature map base
+    - DMA_PARAM_ADDR (0x10C): Per-channel requantize params
+    - NO weight DMA needed (pooling is parameter-free)
+
+POST-PROCESSING (PPU):
+  - POST_CTRL (0x180):
+    * PPU_MODE[1:0] = 0 (CONV_REQ mode)
+    * RELU_EN[2]: Apply ReLU after pooling
+    * ZP_EN[5]: Add output zero point
+    * BIAS_EN[6]: 0 for pure pooling
+    * INT16_OUT[7]: Match input data type
+  
+  - PPU Requantize Pipeline:
+    Pooling Result → ×M → >>S (shift) → +ZP → Clamp → ReLU → Output
+
+INTERFACE SPECIFICATION:
+  - Layer descriptor (62 bytes fixed config):
+    * op_type = 3
+    * pool_mode, pool_h, pool_w
+    * pool_stride_h, pool_stride_w
+    * global_pool (1 for global pooling)
+    * post_ctrl (for requantize/ReLU config)
+    * param_ch_count (output channels for per-channel params)
+
+TILING & MEMORY:
+  - Tiling parameters from descriptor: tile_h, tile_w, tile_num_h, tile_num_w
+  - Ping-pong buffering: DMA loads next tile while computing current tile
+  - Input fits in Activation Scratchpad (32-64KB dual bank)
+  - Output tile size: tile_h × tile_w × C × bytes_per_elem
+
+PERFORMANCE:
+  - Throughput: 16 channels/cycle (PPU-limited)
+  - Typical latency: 7-10 cycles per output pixel
+  - ~0.2-1 GOPS (I/O bound, not compute bound)
+
+================================================================================
+2. ELTWISE ADD OPERATOR (OP_TYPE = 4)
+================================================================================
+
+HARDWARE ARCHITECTURE:
+  - Path: PPU (ADD mode) - NOT Systolic Array
+  - Dual-branch rescaling before addition
+  - Operation: out = rescale_A(in_A) + rescale_B(in_B)
+  - Data Types: INT8 and INT16 fully supported
+
+KEY CONFIGURATION REGISTERS:
+
+  LAYER_MODE (0x040):
+    - OP_TYPE[3:0] = 4 (identifies Add)
+    - DATA_TYPE[4] = 0 (INT8) or 1 (INT16)
+
+  DMA - DUAL INPUT CONFIGURATION:
+    - DMA_IN_ADDR (0x100): Branch A (primary input)
+    - DMA_ADD_B_ADDR (0x120): Branch B (secondary/residual input)
+    - POST_ADD_INPUT_ADDR (0x198): Same as DMA_ADD_B_ADDR (dual-mapped)
+    - DMA_OUT_ADDR (0x104): Output address
+    - NO weight DMA (Add is parameter-free in computation)
+
+  INPUT/OUTPUT DIMENSIONS:
+    - IN_DIM_H_W (0x044): Input H×W (same for both branches)
+    - OUT_DIM_H_W (0x04C): Output H×W (= input for element-wise)
+    - IN/OUT_DIM_C (0x048/0x050): Channels (same for element-wise)
+
+POST-PROCESSING (PPU in ADD Mode):
+  - POST_CTRL (0x180):
+    * PPU_MODE[1:0] = 1 (ADD mode, dual rescale)
+    * RELU_EN[2]: Apply ReLU after addition
+    * ZP_EN[5]: Output zero point offset
+    * INT16_OUT[7]: Output data type
+  
+  - PPU Dual Rescale Pipeline:
+    Branch A → ×M_A → >>S_A → parallel dual processing
+    Branch B → ×M_B → >>S_B → (16 channels/cycle)
+              ↓
+           Addition
+              ↓
+    Clamp → ReLU (optional) → Output to Activation SRAM
+
+ADD PARAMETERS (8 bytes per Add node):
+  - DMA_ADD_PARAM_ADDR (0x124) or POST_ADD_PARAM_ADDR (0x194):
+    * Byte [0:1]: M_A[14:0] (Branch A multiplier)
+    * Byte [2]: S_A[5:0] (Branch A shift)
+    * Byte [3]: reserved
+    * Byte [4:5]: M_B[14:0] (Branch B multiplier)
+    * Byte [6]: S_B[5:0] (Branch B shift)
+    * Byte [7]: reserved
+
+INTERFACE SPECIFICATION:
+  - Layer descriptor (62 bytes fixed config):
+    * op_type = 4
+    * in_h, in_w, in_c (same for both inputs)
+    * out_h, out_w, out_c (= input dimensions)
+    * post_ctrl (PPU_MODE must be 1 for ADD)
+    * residual_src: Layer index for Branch B input (-1 if none)
+    * input_src: Layer index for Branch A input (-1 = previous layer)
+    * has_add: 1 (followed by 8 bytes of add parameters)
+
+TILING & MEMORY:
+  - Element-wise constraint: in_h=out_h, in_w=out_w, in_c=out_c
+  - Ping-pong buffering: Both branches loaded before computation
+  - Typical usage: Residual connections (skip path + main path)
+  - Layer fusion (FUSE_* flags): Avoid writing intermediate tensor to external SRAM
+
+RESIDUAL INTEGRATION:
+  - Control Unit identifies Add layers with residual_src ≠ -1
+  - Schedules dual DMA loading: fetch both branches in parallel or sequentially
+  - Can reorder within tile to keep data local
+
+PERFORMANCE:
+  - Throughput: 16 channels/cycle (same as Conv requantize)
+  - Typical latency: 6-8 cycles per output pixel
+  - ~0.2-1 GOPS (I/O bound, not compute bound)
+
+================================================================================
+3. PPU (POST-PROCESSING UNIT) - UNIFIED DATAPATH
+================================================================================
+
+ARCHITECTURE:
+  - 16 parallel PPU instances (one per output column of Systolic Array)
+  - 6-stage pipeline per instance
+  - Serves multiple modes:
+    * CONV_REQ (0): Standard Conv/DW requantization
+    * ADD (1): Dual-branch rescale + addition
+    * RELU_ONLY (2): Pure activation (bypass requantize)
+    * PASS_THROUGH (3): Identity pass
+
+PPU PIPELINE STAGES:
+  1. Input MUX (select from SA/DW/Pooling/Add)
+  2. Parameter lookup (fetch M/S/zp from Parameter SRAM)
+  3. Multiply (acc×M or dual rescale)
+  4. Shift (>>S with rounding)
+  5. Add/Clamp (+zp, clamp to output range, optional +bias)
+  6. Activation (ReLU/ReLU6/LUT)
+
+HARDWARE RESOURCES:
+  - Per PPU instance: ~550 LUT
+  - Total (16×PPU): ~8,800 LUT (~15% of chip area)
+  - Parameter SRAM: 8KB (indexed by output channel)
+
+CONTROL DISPATCH (from architecture-spec.md):
+  OP_TYPE → Hardware Module Selection
+  - 0-2 (Conv/DW/FC) → Systolic Array → PPU
+  - 3 (Pooling) → Pooling Logic → PPU
+  - 4 (Add) → PPU (ADD mode, bypass SA)
+  - 5 (Resize) → Resize FSM + PPU + RMW writeback
+  - 6-7 (Deconv/Concat) → Specialized paths
+
+================================================================================
+4. KEY ARCHITECTURAL INSIGHTS
+================================================================================
+
+POOLING & ADD AS POST-PROCESSING:
+  ✓ Both bypass Systolic Array (not compute-bound)
+  ✓ Both reuse PPU requantization datapath (hardware efficiency)
+  ✓ Both read/write Activation Scratchpad (no external DRAM round-trips)
+  ✓ Both enable layer fusion with zero intermediate SRAM copies
+
+WHY REUSE PPU INSTEAD OF DEDICATED HARDWARE:
+  - Pooling/Add are infrequent in models (not critical path)
+  - Both need requantization (same PPU pipeline already exists)
+  - Dedicated hardware area > savings (estimated ~750 LUT for dedicated Pooling logic)
+  - Unified design simplifies Control Unit dispatch logic
+
+QUANTIZATION STRATEGY:
+  - Pooling: Pre-quantized accumulator requires per-channel requantize (M/S/zp)
+  - Add: Dual-branch independent scales (M_A/S_A for branch A, M_B/S_B for branch B)
+  - PPU enforces: acc → ×M → >>S → +zp → clamp → relu → output
+
+PARAMETER ORGANIZATION:
+  - Conv per-channel: 14 bytes (M/S/zp/bias×8) × OUT_C → Parameter SRAM
+  - Add rescale: 8 bytes (M_A/S_A/M_B/S_B) per layer
+  - Pooling: Uses same parameter SRAM as Conv (no dedicated params)
+
+MEMORY EFFICIENCY:
+  - No weight storage needed for Pooling/Add
+  - DMA_WEIGHT_ADDR unused for these operators
+  - Activation Scratchpad sole data carrier (input → compute → output)
+  - Ping-pong buffer hides DMA latency
+
+TILING & SCHEDULING:
+  - Compiler (tools/tiling.py) computes optimal tile size
+  - Descriptor specifies: tile_h, tile_w, tile_num_h, tile_num_w
+  - Control Unit executes tile loops (no dynamic tiling in RTL)
+  - Dual-buffer ping-pong for all operators
+
+================================================================================
+5. CRITICAL REGISTER REFERENCE
+================================================================================
+
+POOLING - Typical Configuration:
+  REG(0x040) = 0x03              // OP_TYPE=3, DATA_TYPE=0 (INT8)
+  REG(0x044) = (H<<16) | W       // Input dimensions
+  REG(0x048) = C                 // Input channels
+  REG(0x04C) = (H'<<16) | W'     // Output dimensions
+  REG(0x050) = C                 // Output channels
+  REG(0x060) = (GLOBAL<<20) | (STRIDE_W<<16) | (STRIDE_H<<12) | (W<<8) | (H<<4) | MODE
+  REG(0x100) = input_addr        // DMA input
+  REG(0x104) = output_addr       // DMA output
+  REG(0x10C) = param_addr        // Per-channel requantize params
+  REG(0x180) = (RELU_EN<<2) | 0  // POST_CTRL: PPU_MODE=CONV_REQ
+  REG(0x188) = C                 // POST_PARAM_COUNT
+  REG(0x000) = 0x01              // NPU_CTRL: START
+
+ADD - Typical Configuration:
+  REG(0x040) = 0x14              // OP_TYPE=4, DATA_TYPE=1 (INT16)
+  REG(0x044) = (H<<16) | W       // Input dimensions (same for both branches)
+  REG(0x048) = C                 // Channels
+  REG(0x04C) = (H<<16) | W       // Output dimensions (= input)
+  REG(0x050) = C                 // Output channels
+  REG(0x100) = branch_a_addr     // DMA_IN_ADDR
+  REG(0x120) = branch_b_addr     // DMA_ADD_B_ADDR
+  REG(0x104) = output_addr       // DMA_OUT_ADDR
+  REG(0x124) = add_param_addr    // DMA_ADD_PARAM_ADDR (M_A/S_A/M_B/S_B)
+  REG(0x180) = (RELU_EN<<2) | (INT16_OUT<<7) | 0x01  // POST_CTRL: PPU_MODE=ADD
+  REG(0x000) = 0x01              // NPU_CTRL: START
+
+================================================================================
+6. DESIGN TRADE-OFFS
+================================================================================
+
+POOLING:
+  ✓ Efficient: Reuses PPU, no dedicated hardware needed
+  ✗ Limited throughput: 16 ch/cycle (vs 256 MACs/cycle for Conv)
+    → Acceptable: Pooling is post-processing, not critical path
+
+ADD:
+  ✓ Enables residual fusion: Keeps intermediate in Scratchpad, saves DRAM round-trip
+  ✓ Dual rescaling: Handles independent quantization scales
+  ✗ Dual-input bandwidth: Requires loading two branches to Scratchpad
+    → Mitigated: Scheduling flexibility via tile overlap
+
+PPU-CENTRIC DESIGN:
+  ✓ Single unified datapath for Conv/DW/Pooling/Add (reduces logic)
+  ✗ Throughput bottleneck: 16 ch/cycle for all post-processing
+    → Justified: Typically ~10% of model is post-processing layers
+
+================================================================================
+7. VERIFICATION CHECKLIST
+================================================================================
+
+For RTL Implementation:
+  [ ] POOL_CFG register fully decoded (MODE/H/W/STRIDE/GLOBAL_POOL)
+  [ ] Pooling Logic connected to PPU input MUX
+  [ ] DMA_ADD_B_ADDR and DMA_ADD_PARAM_ADDR dual-mapped registers
+  [ ] PPU_MODE routing in POST_CTRL (ADD vs CONV_REQ vs RELU_ONLY)
+  [ ] Per-channel parameter loading from DMA to Parameter SRAM
+  [ ] Ping-pong tile buffer selection via control unit state
+  [ ] Add rescale parameters (M_A/S_A/M_B/S_B) applied in parallel
+  [ ] Clamp range configurable per layer (POST_CLAMP register)
+
+For Driver/Software:
+  [ ] Descriptor encoding: op_type=3 for Pooling, =4 for Add
+  [ ] Pool config fields in layer descriptor match CSR encoding
+  [ ] Add parameter packing: 8 bytes (M_A/S_A/M_B/S_B)
+  [ ] Residual connection indexing via residual_src field
+  [ ] Layer fusion (FUSE_* flags) avoids intermediate writeback
+  [ ] Tiling loop: descriptor specifies tile_h/w/num_h/num_w
+
+================================================================================
+8. DOCUMENTATION FILES
+================================================================================
+
+Generated Report:
+  /data/sam/open-npu/design/POOLING_ADD_ARCHITECTURE_REPORT.md (30KB)
+    - Comprehensive architecture analysis
+    - Configuration register details
+    - PPU pipeline description
+    - Usage examples (CPU C code)
+    - Performance characteristics
+    - Design rationale
+
+Source Documents (Already Available):
+  /data/sam/open-npu/design/architecture-spec.md
+    - §12: PPU Microarchitecture
+    - §10.3.1: Dispatch table (operator → hardware module)
+  
+  /data/sam/open-npu/design/npu-register-spec.md
+    - §4.2: POOL_CFG register (0x060)
+    - §5: POST_CTRL register (0x180)
+    - §9.2: Add layer example code
+  
+  /data/sam/open-npu/design/interface-spec.md
+    - §2: Layer Descriptor encoding
+    - §5: POST_CTRL bit field encoding
+    - §7: Add Parameter Pack format
+
+================================================================================
+Report Generated: 2026-05-29
+Status: READY FOR IMPLEMENTATION & VERIFICATION
+================================================================================
