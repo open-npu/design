@@ -21,6 +21,32 @@ Hardware architecture and interface specifications for the Open-NPU neural netwo
 - Wishbone-B4 bus interface
 - Target: ~0.2 TOPS @ 200MHz
 
+## Supported Operators (RTL Verified)
+
+All 8 CNN operator types are implemented in synthesizable Verilog and verified bit-exact against the C simulator golden reference.
+
+| op_type | Operator | Hardware Path | RTL Status |
+|---------|----------|---------------|------------|
+| 0 | Conv2D | Systolic Array (1×1, 3×3) | Verified |
+| 1 | DWConv | DW Conv Module (any kernel) | Verified |
+| 2 | FC | Systolic Array (reuses Conv2D) | Verified |
+| 3 | Pooling | Pooling FSM (Max / Avg / Global) | Verified |
+| 4 | Eltwise Add | Add FSM + dual rescale | Verified |
+| 5 | Resize | Resize FSM (nearest / bilinear) | Verified |
+| 6 | Deconv | Conv2D path + zero-insertion skip | Verified |
+| 7 | Concat | Reuses Add FSM + offset addressing | Verified |
+
+## RTL Verification Status
+
+| Test Suite | Scope | Result |
+|------------|-------|--------|
+| Unit tests (PE, Systolic, PPU, CSR, SRAM, DMA, DW, Ctrl, Top, Compute) | 90+ tests | All PASS |
+| DMA E2E INT8 10-layer MobileNetV2-Tiny | Per-layer bit-exact | PASS |
+| DMA E2E INT16 10-layer MobileNetV2-Tiny | Per-layer bit-exact | PASS |
+| Spatial Tiling E2E (32×32 input, 6 layers) | All tiling variants | PASS |
+| Individual operator E2E (Pooling, Add, Resize, Deconv, Concat) | 15+ tests | All PASS |
+| **AllOps-Mini full model** (18 layers, 7 op types, 16×16 input) | **End-to-end bit-exact** | **PASS** |
+
 ## Related Repositories
 
 - [open-npu/rtl](https://github.com/open-npu/rtl) — Synthesizable Verilog implementation

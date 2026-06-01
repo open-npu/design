@@ -1,8 +1,8 @@
 # Open-NPU 整体架构规格
 
-> 版本：V1.0 Draft
-> 日期：2025-05-18
-> 状态：阶段1架构定义
+> 版本：V1.1
+> 日期：2026-06-01
+> 状态：全算子 RTL 验证完成
 
 ---
 
@@ -14,7 +14,7 @@
 | 峰值算力 | 0.2 TOPS (200 GOPS) @ 200MHz |
 | 数据类型 | INT16 activation × INT16 weight（主力），兼容INT8模式 |
 | 累加器 | 40-bit signed，支持1×1 Conv最大C_in=512 |
-| 工作负载 | CNN：Conv2D, DW Conv, FC, Pooling, ReLU, Add |
+| 工作负载 | CNN：Conv2D, DW Conv, FC, Pooling, Add, Resize, Deconv, Concat |
 | 控制方式 | 层级寄存器配置 + 可编程后处理流水线 |
 | 存储架构 | 分布式Scratchpad（64-128KB） |
 | 总线 | Wishbone（LiteX原生），商业化时加AXI Wrapper |
@@ -1219,17 +1219,17 @@ Prefetch 控制信号:
 ### 10.6 算子模式派发
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│  mode (from CSR)        Dispatch                           │
-├────────────────────────────────────────────────────────────┤
-│  CONV2D / FC            → Systolic Array (im2col映射)      │
-│  DW_CONV                → DW Conv Module (bypass SA)       │
-│  POOLING (avg/max)      → Pooling Logic (复用PPU datapath)  │
-│  ADD (element-wise)     → PPU (ADD mode, bypass SA)        │
-│  RELU_ONLY              → PPU (RELU_ONLY mode)             │
-│  RESIZE (nearest/bilinear) → Resize FSM + PPU + RMW WB    │
-│  CONCAT                 → DMA only (重排写地址)             │
-└────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  mode (from CSR)            Dispatch                              │
+├──────────────────────────────────────────────────────────────────┤
+│  CONV2D / FC (0/2)          → Systolic Array (im2col映射)         │
+│  DW_CONV (1)                → DW Conv Module (bypass SA)          │
+│  POOLING (3, avg/max)       → Pooling FSM (复用PPU datapath)      │
+│  ADD (4, element-wise)      → Add FSM + dual rescale + PPU       │
+│  RESIZE (5, nearest/bilin)  → Resize FSM + PPU + RMW WB          │
+│  DECONV (6)                 → Conv2D path + zero-insertion skip   │
+│  CONCAT (7)                 → 复用Add FSM + per-branch rescale    │
+└──────────────────────────────────────────────────────────────────┘
 
 不同算子走不同硬件路径, Control Unit 根据 mode 决定:
   - 哪些模块激活
@@ -1949,7 +1949,63 @@ PPU 总面积 = 16 × 550 = ~8,800 LUT，占整芯片 ~6%。
 
 ---
 
-## 14. 决策依赖链
+## 14. RTL 验证状态
+
+### 14.1 算子验证矩阵
+
+全部 8 种算子均在 Icarus Verilog 仿真中通过 bit-exact 验证。
+
+| op_type | 算子 | 硬件路径 | INT8 | INT16 | E2E Tests |
+|---------|------|----------|------|-------|-----------|
+| 0 | Conv2D (1×1, 3×3) | Systolic Array | ✅ | ✅ | 10+ |
+| 1 | DWConv (任意kernel) | DW Conv Module | ✅ | ✅ | 6+ |
+| 2 | FC | 复用 Conv2D | ✅ | ✅ | 2+ |
+| 3 | Pooling (Max/Avg/Global) | Pooling FSM | ✅ | ✅ | 3 |
+| 4 | Eltwise Add | Add FSM + dual rescale | ✅ | ✅ | 3 |
+| 5 | Resize (nearest/bilinear) | Resize FSM | ✅ | ✅ | 4 |
+| 6 | Deconv (2×2/3×3) | Conv2D + zero-insert | ✅ | ✅ | 4 |
+| 7 | Concat (multi-branch) | 复用 Add FSM | ✅ | ✅ | 4 |
+
+### 14.2 系统级验证
+
+| 测试 | 描述 | 结果 |
+|------|------|------|
+| 单元测试 | PE, Systolic, PPU, CSR, SRAM, DMA, DW, Ctrl, Top, Compute | 90+ PASS |
+| DMA E2E INT8 | 10层 MobileNetV2-Tiny，DMA 端到端 | bit-exact PASS |
+| DMA E2E INT16 | 10层 MobileNetV2-Tiny，DMA 端到端 | bit-exact PASS |
+| Spatial Tiling | 32×32 输入, 6层, 多种 tiling 配置 | bit-exact PASS |
+| **AllOps-Mini** | **18层全模型, 7种算子, 16×16 输入** | **bit-exact PASS** |
+
+### 14.3 AllOps-Mini 全模型测试架构
+
+AllOps-Mini 是一个 18 层端到端测试模型，覆盖全部 7 种算子类型及真实模型拓扑特征：
+
+```
+Layer  0: Conv2D   16×16×3   → 8×8×8      k=3 s=2
+Layer  1: DWConv   8×8×8     → 8×8×8      k=3 s=1
+Layer  2: Conv2D   8×8×8     → 8×8×16     k=1 s=1  [residual save]
+Layer  3: DWConv   8×8×16    → 8×8×16     k=3 s=1
+Layer  4: Conv2D   8×8×16    → 8×8×16     k=1 s=1
+Layer  5: Add      8×8×16                 (L2 + L4 残差连接)
+Layer  6: DWConv   8×8×16    → 4×4×16     k=3 s=2
+Layer  7: Conv2D   4×4×16    → 4×4×32     k=1 s=1  [concat save]
+Layer  8: Pooling  4×4×32    → 2×2×32     MaxPool k=2 s=2
+Layer  9: Conv2D   2×2×32    → 2×2×32     k=1 s=1
+Layer 10: Resize   2×2×32    → 4×4×32     nearest 2×
+Layer 11: Conv2D   4×4×32    → 4×4×16     k=1 s=1
+Layer 12: Concat   4×4×16    (branch A)   offset=0, total_c=48
+Layer 13: Concat   4×4×32    (branch B)   offset=16, total_c=48
+Layer 14: Conv2D   4×4×48    → 2×2×16     k=3 s=2
+Layer 15: Pooling  2×2×16    → 1×1×16     GlobalAvgPool
+Layer 16: Deconv   1×1×16    → 2×2×16     k=2 s=2
+Layer 17: Conv2D   2×2×16    → 1×1×8      k=2 s=1 pad=0
+```
+
+覆盖特征：残差加法、Concat 跳跃连接、stride-2 下采样、GlobalAvgPool、Deconv 上采样、通道扩展 (3→48) 与压缩 (48→8)。
+
+---
+
+## 15. 决策依赖链
 
 ```
 目标场景(MCU IP) → 性能(0.2T) → 工作负载(CNN) → 数据类型(INT8/16)
@@ -1961,7 +2017,7 @@ PPU 总面积 = 16 × 550 = ~8,800 LUT，占整芯片 ~6%。
 
 ---
 
-## 15. CSR寄存器定义
+## 16. CSR寄存器定义
 
 详见 [npu-register-spec.md](npu-register-spec.md)
 
