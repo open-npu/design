@@ -2,7 +2,7 @@
 
 > 版本：V1.2
 > 日期：2026-06-02
-> 状态：全算子 RTL 验证完成 + INT16 全链路回归通过 + 多层自动推理 + IRQ 中断验证 + Baremetal 驱动 SDK + FreeRTOS 驱动层
+> 状态：全算子 RTL 验证完成 + INT16 全链路回归通过 + 多层自动推理 + IRQ 中断验证 + Baremetal 驱动 SDK + FreeRTOS 驱动层 + Pre-CPU 集成测试加固
 
 ---
 
@@ -2121,6 +2121,37 @@ Test  33   : IRQ 中断驱动 E2E
 ```
 
 验证环境：Verilator 5.036, 224M ns 仿真时间, 19m38s 壁钟时间 (~190K ns/s)。
+
+### 14.9 Pre-CPU 集成测试加固
+
+CPU 集成前针对 Wishbone 协议合规、异常恢复、边界参数、DMA 鲁棒性进行系统测试。
+
+| 类别 | 测试文件 | 测试数 | 结果 |
+|------|----------|--------|------|
+| P0.1 Wishbone 协议 | `test_wb_protocol.py` | 6 | **6/6 PASS** |
+| P0.2 Abort/Reset 鲁棒 | `test_abort_reset.py` | 6 | **6/6 PASS** |
+| P0.3 边界参数 | `test_edge_cases.py` | 6 | **6/6 PASS** |
+| P1.1 DMA 鲁棒性 | `test_dma_robust.py` | 4 | **4/4 PASS** |
+| P1.2 CSR 完整性 | `test_csr_complete.py` | 4 | **4/4 PASS** |
+| P1.3 Lint/综合 | Verilator + Yosys | — | 0 error, 201 warn |
+| P2.1 MAC 计数器 | `npu_top.v` | 1 | ✓ 实现+验证 |
+| P2.2 随机压力 | `test_random_stress.py` | 2 | **22/22 PASS** |
+
+重点验证项：
+- Wishbone back-to-back 流水访问、CYC/STB 解耦、DMA stall/backpressure
+- 中途 abort 在所有 FSM 阶段（wgt_load/compute/store/auto-next）均可恢复
+- OUT_C=0/1/256 极端配置无挂起
+- 16K word 最大 DMA 传输、总线死锁 abort 恢复
+- 34 个 RW 寄存器读写一致性、busy 期间 CSR 可写
+- MAC 计数器：Conv sa_act_valid → +ARRAY_SIZE, DW dw_in_valid → +1
+- 50 组随机层配置 + 20 次随机 abort 注入均通过
+
+Lint 摘要 (Verilator `--lint-only -Wall`)：
+- WIDTHEXPAND: 106 (窄→宽自动零扩展，安全)
+- UNUSEDSIGNAL: 52 (大型设计正常)
+- WIDTHTRUNC: 40 (有意截断)
+- PINCONNECTEMPTY: 1 (xfer_count 未连接)
+- 0 ERROR, 0 latch, 0 comb loop
 
 ---
 
