@@ -48,6 +48,7 @@ Open-NPU 神经网络加速器的硬件架构与接口规格文档。
 | **AllOps-Mini 全模型** (18 层, 7 种算子, 16×16 输入) | **端到端 bit-exact** | **通过** |
 | **AllOps-128 全模型** (18 层, 22 次调用, 128×128 输入) | **E2E bit-exact + DMA tiling** | **通过** |
 | **INT16 全链路回归** (10 项测试, 全部 7 种算子 + AllOps-Mini INT16) | **10/10 bit-exact** | **通过** |
+| **Auto-Next 多层自动推理** (3 层自动推理, 单次 START) | **FSM 自动重启 bit-exact** | **通过** |
 
 ## 综合结果 (Yosys `synth_xilinx`)
 

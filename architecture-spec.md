@@ -1,8 +1,8 @@
 # Open-NPU 整体架构规格
 
-> 版本：V1.1
-> 日期：2026-06-01
-> 状态：全算子 RTL 验证完成 + INT16 全链路回归通过
+> 版本：V1.2
+> 日期：2026-06-02
+> 状态：全算子 RTL 验证完成 + INT16 全链路回归通过 + 多层自动推理
 
 ---
 
@@ -1977,6 +1977,7 @@ PPU 总面积 = 16 × 550 = ~8,800 LUT，占整芯片 ~6%。
 | **AllOps-Mini** | **18层全模型, 7种算子, 16×16 输入** | **bit-exact PASS** |
 | **AllOps-128** | **18层全模型, 22次调用, 128×128 输入, DMA tiling** | **bit-exact PASS** |
 | **INT16 全链路回归** | **10 项 INT16 测试, 覆盖全部 7 种算子** | **10/10 PASS** |
+| **Auto-Next 多层推理** | **3 层自动连续推理, 单次 START** | **bit-exact PASS** |
 
 ### 14.3 AllOps-Mini 全模型测试架构
 
@@ -2050,6 +2051,32 @@ INT16 数据通路全链路回归验证，确认 PE 16×16 MAC、npu_compute cfg
 | test_full_model_allops_int16 | AllOps-Mini 18层全模型, INT16 | PASS | 5.2M ns |
 
 AllOps-Mini INT16 全模型覆盖与 INT8 版本相同的拓扑结构（§14.3），但元素宽度为 2 字节、激活/权重范围 [-32768, 32767]。总仿真时间 267s，~194K ns/s throughput。
+
+### 14.6 Auto-Next 多层自动推理
+
+npu_ctrl 支持 **AUTO_NEXT** 模式，通过单次 START 自动执行多层推理：
+
+| 寄存器 | 地址 | 描述 |
+|--------|------|------|
+| CTRL.AUTO_NEXT | 0x000[3] | 自动推理使能（latched，非自清除） |
+| LAYER_COUNT | 0x030 | 总层数（8-bit RW） |
+
+**工作流程**：
+1. CPU 预写全部 DDR 数据（weights/params/activations）
+2. 配置第一层 CSR，写 `LAYER_COUNT`
+3. 写 `CTRL = 0x09`（AUTO_NEXT=1 + START=1）
+4. S_DONE 状态：若 `auto_next=1` 且 `hw_curr_layer+1 < layer_count` → 自动跳转 S_LOAD_WGT
+5. hw_busy 在层间保持高电平，hw_done 每层脉冲（可触发 IRQ）
+6. CPU 利用 compute 阶段（≥1000 cycles）通过 Wishbone 写入下一层 CSR
+
+**终止条件**：
+- `hw_curr_layer >= layer_count`：正常结束
+- `ctrl_abort`：立即终止（aborted 标志阻止 auto-restart）
+- CPU 写 `AUTO_NEXT=0`：当前层完成后停止
+
+**验证状态**：
+- 14 项 npu_ctrl 单元测试通过（含 3 项 auto-next 测试）
+- E2E `test_auto_next_3layer`：3 层相同 Conv2D 1×1 自动推理，bit-exact PASS（610K ns）
 
 ---
 
