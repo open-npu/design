@@ -2,7 +2,7 @@
 
 > 版本：V1.2
 > 日期：2026-06-02
-> 状态：全算子 RTL 验证完成 + INT16 全链路回归通过 + 多层自动推理 + IRQ 中断验证
+> 状态：全算子 RTL 验证完成 + INT16 全链路回归通过 + 多层自动推理 + IRQ 中断验证 + Baremetal 驱动 SDK
 
 ---
 
@@ -1979,6 +1979,7 @@ PPU 总面积 = 16 × 550 = ~8,800 LUT，占整芯片 ~6%。
 | **INT16 全链路回归** | **10 项 INT16 测试, 覆盖全部 7 种算子** | **10/10 PASS** |
 | **Auto-Next 多层推理** | **3 层自动连续推理, 单次 START** | **bit-exact PASS** |
 | **IRQ 中断机制** | **DONE/ERROR/DMA_DONE 中断, mask/W1C, E2E 中断驱动推理** | **4 tests PASS** |
+| **Baremetal 驱动 SDK** | **HAL(寄存器宏+MMIO) + Driver(层编程/IRQ/模型加载), 零依赖** | **GCC 编译通过** |
 
 ### 14.3 AllOps-Mini 全模型测试架构
 
