@@ -8,6 +8,7 @@ Open-NPU 神经网络加速器的硬件架构与接口规格文档。
 
 | 文档 | 说明 |
 |------|------|
+| [QUICK_START.md](QUICK_START.md) | **快速上手** — ONNX → 量化 → CSIM → RTL 验证，完整端到端流程 |
 | [architecture-spec.md](architecture-spec.md) | 完整架构规格 — 数据通路、存储层次、各模块微架构 |
 | [interface-spec.md](interface-spec.md) | 端口级接口时序与协议定义 |
 | [npu-register-spec.md](npu-register-spec.md) | CSR 寄存器映射、位域、访问类型 |

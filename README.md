@@ -8,6 +8,7 @@ Hardware architecture and interface specifications for the Open-NPU neural netwo
 
 | Document | Description |
 |----------|-------------|
+| [QUICK_START.md](QUICK_START.md) | **Getting started guide** — ONNX → quantization → CSIM → RTL verification, end-to-end workflow |
 | [architecture-spec.md](architecture-spec.md) | Full architecture specification — datapath, memory hierarchy, micro-architecture of each module |
 | [interface-spec.md](interface-spec.md) | Port-level interface timing and protocol definitions |
 | [npu-register-spec.md](npu-register-spec.md) | CSR register map, bit fields, access types |
