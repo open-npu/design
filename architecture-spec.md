@@ -2,7 +2,7 @@
 
 > 版本：V1.2
 > 日期：2026-06-02
-> 状态：全算子 RTL 验证完成 + INT16 全链路回归通过 + DB_EN 双缓冲 + 多层自动推理 + IRQ 中断验证 + Baremetal 驱动 SDK + FreeRTOS 驱动层 + Pre-CPU 集成测试加固
+> 状态：全算子 RTL 验证完成 + INT16 全链路回归通过 + DB_EN 双缓冲 + 多层自动推理 + IRQ 中断验证 + Baremetal 驱动 SDK + FreeRTOS 驱动层 + SoC E2E 全回归
 
 ---
 
@@ -1982,6 +1982,7 @@ PPU 总面积 = 16 × 550 = ~8,800 LUT，占整芯片 ~6%。
 | **IRQ 中断机制** | **DONE/ERROR/DMA_DONE 中断, mask/W1C, E2E 中断驱动推理** | **4 tests PASS** |
 | **Baremetal 驱动 SDK** | **HAL(寄存器宏+MMIO) + Driver(层编程/IRQ/模型加载), 零依赖** | **GCC 编译通过** |
 | **FreeRTOS 驱动层** | **Mutex互斥 + xTaskNotify中断唤醒 + 同步/异步API, 基于baremetal层封装** | **GCC 编译通过** |
+| **SoC E2E 全回归** | **LiteX VexRiscv SoC, 25 项测试含全部 8 算子的 INT8/INT16/AllOps-Mini** | **25/25 PASS** |
 
 ### 14.3 AllOps-Mini 全模型测试架构
 
@@ -2179,6 +2180,50 @@ Lint 摘要 (Verilator `--lint-only -Wall`)：
 - WIDTHTRUNC: 40 (有意截断)
 - PINCONNECTEMPTY: 1 (xfer_count 未连接)
 - 0 ERROR, 0 latch, 0 comb loop
+
+### 14.11 SoC E2E 全回归
+
+基于 LiteX + VexRiscv (rv32im) 的完整 SoC 仿真，验证 NPU 在真实 CPU 驱动下的端到端正确性。
+
+**测试架构**：
+- 固件通过 Wishbone 总线编程 NPU CSR、搬运 DDR 数据、逐层验证输出
+- 全部 25 个测试串行执行，每测试包含 1~18 层
+- 验证环境：Verilator 5.036, 18.2M 周期, ~46s 壁钟时间
+
+**测试清单**：
+
+| 测试 | 内容 | 层数 | 结果 |
+|------|------|:----:|:----:|
+| 1 | INT8 MobileNetV2-Tiny (10层端到端) | 10 | **10/10 PASS** |
+| 2 | INT16 MobileNetV2-Tiny (10层端到端) | 10 | **10/10 PASS** |
+| 3 | Pool Max INT8 | 1 | **PASS** |
+| 4 | Pool Avg INT8 | 1 | **PASS** |
+| 5 | Pool Global INT8 | 1 | **PASS** |
+| 6 | Pool Max INT16 | 1 | **PASS** |
+| 7 | Pool Avg INT16 | 1 | **PASS** |
+| 8 | Pool Global INT16 | 1 | **PASS** |
+| 9 | Resize Nearest INT8 | 1 | **PASS** |
+| 10 | Resize Bilinear INT16 | 1 | **PASS** |
+| 11 | Resize Nearest INT16 | 1 | **PASS** |
+| 12 | Deconv 2×2 stride-2 | 1 | **PASS** |
+| 13 | Deconv 3×3 stride-2 | 1 | **PASS** |
+| 14 | Deconv INT16 | 1 | **PASS** |
+| 15 | Concat INT8 | 1 | **PASS** |
+| 16 | Concat INT16 | 1 | **PASS** |
+| 17 | Add Basic INT8 | 1 | **PASS** |
+| 18 | Add INT16 | 1 | **PASS** |
+| 19 | DWConv INT8 | 1 | **PASS** |
+| 20 | DWConv INT16 | 1 | **PASS** |
+| 21 | Conv2D INT8 | 1 | **PASS** |
+| 22 | Conv2D INT16 | 1 | **PASS** |
+| 23 | FC INT8 | 1 | **PASS** |
+| 24 | AllOps-Mini INT8 (18层全模型) | 18 | **18/18 PASS** |
+| 25 | AllOps-Mini INT16 (18层全模型) | 18 | **18/18 PASS** |
+
+**覆盖算子**：Conv2D(0) / DWConv(1) / FC(2) / Pool(3) / Add(4) / Resize(5) / Deconv(6) / Concat(7) — 全部 8 算子 INT8+INT16。
+**覆盖场景**：单算子独立测试、多算子流水(AllOps-Mini)、INT8/INT16 双路径、残差连接(Add)、跳跃连接(Concat)、上采样(Deconv/Resize)、下采样(Pool/Strided Conv)。
+
+所有测试在 Verilator 下 **25/25 PASS**，确认 NPU RTL 与 LiteX SoC 集成完整可用。
 
 ---
 
