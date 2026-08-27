@@ -107,7 +107,7 @@ cd /data/sam/open-npu/csim
 
 ```bash
 cd /data/sam/open-npu/tools
-python3 compare.py \
+python3 internal/compare.py \
     --model ./model.onnx \
     --input ./test_input.bin \
     --npu-output ../csim/output.bin \
@@ -268,8 +268,7 @@ open-npu/
 ├── tools/               ← Python 工具链
 │   ├── onnx_converter.py        ONNX → NPU1 转换
 │   ├── model_packer.py          NPU1 打包
-│   ├── compare.py               精度比较
-│   └── test_*.py                E2E 测试脚本
+│   └── internal/                测试 / golden / 精度脚本（发布时去掉）
 ├── csim/                ← C 仿真器
 │   ├── src/                     源码
 │   └── Makefile
