@@ -1,6 +1,6 @@
 # Open-NPU 整机说明
 
-这份文档是整颗 NPU 的地图。先讲它是什么、一次推理经过哪些人，再讲硬件、量化、切块、软件链、验收。切块 / 双缓冲 / 融合的信号级细节在 `tools/model_d_fused_tiling_explained.md`。
+这份文档是整颗 NPU 的地图。先讲它是什么、一次推理经过哪些人，再讲硬件、量化、切块、软件链、验收。切块 / 双缓冲 / 融合的信号级细节在 `tools/internal/model_d_fused_tiling_explained.md`。
 
 读完后应能回答：一张图从 ONNX 到 RTL 比对，中间每一步谁在干什么、数据在哪、怎样才算过。
 
@@ -313,7 +313,7 @@ skip_store    = (fuse_start | fuse_mid) & (tile_h == 0)
 
 也就是：**切块的融合不再靠「跳过 DMA」省带宽**，改走 DDR + PTS。不切块的融合仍可 SRAM 直通。
 
-D16 的 L9–L11 切块网格不同，修完这条之后整网 bit-exact。D8 的 L16–L18 是「切块 START + 不切块 MID/END」，仍是当前缺口。信号级时间线见 `tools/model_d_fused_tiling_explained.md`。
+D16 的 L9–L11 切块网格不同，修完这条之后整网 bit-exact。D8 的 L16–L18 是「切块 START + 不切块 MID/END」，仍是当前缺口。信号级时间线见 `tools/internal/model_d_fused_tiling_explained.md`。
 
 ### 7.4 固件怎么把层串起来
 
@@ -344,7 +344,7 @@ soc/run_model_e2e.sh model_d_int16
 
 ### 8.1 转换 + CSIM dump
 
-`tools/gen/model_*_golden.py`：
+`tools/internal/gen/model_*_golden.py`：
 
 1. `convert_model()`：ONNX → NPU1（`0x4E505531`）
 2. 跑 `/data/sam/open-npu/csim/npu_sim`，`DUMP_LAYERS=1`，`ACC_WIDTH=44`
@@ -412,9 +412,9 @@ soc/run_model_e2e.sh model_d_int16
 
 脚本：
 
-- 余弦：`tools/phase1_model_matrix.py`（只做门 1；验收必须加 `--rtl`）
-- 整网回归入口：`tools/phase1_regression.py`（正式门，full 会跑十格两道门）
-- 硬件冻结项：`tools/PHASE1_ACCEPTANCE.md`
+- 余弦：`tools/internal/phase1_model_matrix.py`（只做门 1；验收必须加 `--rtl`）
+- 整网回归入口：`tools/internal/phase1_regression.py`（正式门，full 会跑十格两道门）
+- 硬件冻结项：`tools/internal/PHASE1_ACCEPTANCE.md`
 
 ---
 
@@ -474,7 +474,7 @@ cd soc/firmware && make clean && make MODEL=model_d_int8
 cd ../sim && ./obj_dir/Vsim
 
 # 只看浮点余弦（不是 RTL 门）
-python3 tools/phase1_model_matrix.py
+python3 tools/internal/phase1_model_matrix.py
 ```
 
 UART 里一层正常结束像：
@@ -524,7 +524,7 @@ Icarus 单层 fused 诊断（`rtl/tb/e2e/test_md_l11_diag.py`）不要当整网�
 - `tools/onnx_converter.py` — ONNX → NPU1
 - `tools/model_packer.py` — NPU1 布局、`sched_ctrl` 位
 - `tools/tiling.py` / `layer_fusion.py` / `hw_config.py`
-- `tools/gen/model_*_golden.py` — 当场 CSIM → npy
+- `tools/internal/gen/model_*_golden.py` — 当场 CSIM → npy
 - `csim/npu_sim` — 功能 golden
 - `soc/firmware/main.c` — 链式调度和比对
 - `soc/firmware/gen_soc_test.py` — npy → NPU2 blob
@@ -532,9 +532,9 @@ Icarus 单层 fused 诊断（`rtl/tb/e2e/test_md_l11_diag.py`）不要当整网�
 
 验收与说明：
 
-- `tools/PHASE1_ACCEPTANCE.md` — 正式门（偏仓库回归）
-- `tools/phase1_model_matrix.py` — 十格余弦
-- `tools/model_d_fused_tiling_explained.md` — 融合 / 双缓冲信号
+- `tools/internal/PHASE1_ACCEPTANCE.md` — 正式门（偏仓库回归）
+- `tools/internal/phase1_model_matrix.py` — 十格余弦
+- `tools/internal/model_d_fused_tiling_explained.md` — 融合 / 双缓冲信号
 - 本文 — 整机地图
 
 ---
