@@ -20,7 +20,7 @@
 
 ```bash
 cd /data/sam/open-npu/csim
-make          # 默认: 16×16 脉动阵列, 128KB SRAM, INT8+INT16
+make          # 默认: 64-lane MAC Row, 172KB SRAM, INT8+INT16
 
 # 自定义配置
 make CFLAGS_HW="-DNPU_ARRAY_SIZE=4 -DNPU_SPAD_SIZE_KB=32"
@@ -247,13 +247,13 @@ Header (16 字节):
 
 | 参数 | 指标 |
 |------|------|
-| 峰值算力 | 0.2 TOPS @ 200MHz |
+| 峰值算力 | 12.8 GMAC/s (25.6 GOPS) @ 200MHz |
 | 数据类型 | INT8 / INT16 |
-| 累加器 | 40-bit signed |
-| 脉动阵列 | 16×16 INT8, weight-stationary |
-| 片上 SRAM | 128KB Activation + 64KB Weight + 8KB Param |
-| 总线 | Wishbone-B4 |
-| FPGA 目标 | Artix-7 XC7A200T (~52K LUT, 39K FF, 26 BRAM, 333 DSP) |
+| 累加器 | 44-bit signed |
+| 计算核心 | 64-lane K-major MAC Row (64 MACs/cycle) + 8-ch DW Bank |
+| 片上 SRAM | 172KB (32KB IFM + 48KB OFM + 80KB Weight + 12KB Param) |
+| 总线 | Wishbone-B4 32-bit (4 B/cycle) |
+| FPGA 目标 | Xilinx 7-Series / Zynq-7000 (ZC706 等) |
 
 ---
 

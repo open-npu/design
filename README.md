@@ -15,12 +15,12 @@ Hardware architecture and interface specifications for the Open-NPU neural netwo
 
 ## Key Specs
 
-- 16×16 INT8 systolic array (configurable)
-- INT8 / INT16 mixed precision support
+- 64-lane 1D MAC row engine (64 MACs/cycle) + 8-ch streaming DW unit
+- INT8 / INT16 mixed precision support with 44-bit signed accumulators
 - Per-channel requantization with INT64 bias accumulation
-- 128KB activation SRAM + 64KB weight SRAM + 8KB parameter SRAM
-- Wishbone-B4 bus interface
-- Target: ~0.2 TOPS @ 200MHz
+- 172KB split 4-bank Scratchpad (32KB IFM + 48KB OFM + 80KB WGT + 12KB PARAM, 512-bit wide read ports)
+- Wishbone-B4 32-bit bus interface (4 B/cycle, 16 MACs/Byte machine balance)
+- Peak throughput: 12.8 GMAC/s (25.6 GOPS / 0.0256 TOPS) @ 200MHz
 
 ## Supported Operators (RTL Verified)
 

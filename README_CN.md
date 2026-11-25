@@ -15,12 +15,12 @@ Open-NPU 神经网络加速器的硬件架构与接口规格文档。
 
 ## 核心指标
 
-- 16×16 INT8 脉动阵列（可配置）
-- INT8 / INT16 混合精度支持
+- 64-lane 一维 MAC 行引擎（64 MACs/cycle）+ 8-ch DW 流式单元
+- INT8 / INT16 混合精度支持，44-bit 有符号累加器
 - Per-channel 重量化，INT64 bias 累加
-- 128KB 激活 SRAM + 64KB 权重 SRAM + 8KB 参数 SRAM
-- Wishbone-B4 总线接口
-- 目标算力：~0.2 TOPS @ 200MHz
+- 172KB 独立四库 Scratchpad（32KB IFM + 48KB OFM + 80KB WGT + 12KB PARAM，512-bit 宽读口）
+- Wishbone-B4 32-bit 总线接口（4 B/cycle，机器平衡比 16 MACs/Byte）
+- 峰值算力：12.8 GMAC/s（25.6 GOPS / 0.0256 TOPS）@ 200MHz
 
 ## 支持的算子（RTL 已验证）
 
