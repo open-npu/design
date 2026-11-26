@@ -39,7 +39,7 @@ ONNX 浮点模型
     ▼
 NPU1 二进制 (*.npu1.bin)  ──────────►  csim/npu_sim（C 参考模拟器，生成逐层 golden）
     │
-    │  tools/internal/gen/model_*_golden.py + soc/firmware/gen_soc_test.py
+    │  soc/firmware/gen_soc_test.py
     ▼
 NPU2 固件测试镜像 + RISC-V 验证程序
     │
@@ -49,7 +49,7 @@ soc/sim Verilator 整机仿真：VexRiscv 写 CSR -> NPU RTL 链式推理 -> UAR
 
 | 目录 | 角色 |
 |---|---|
-| `tools/` | ONNX 转换器、空间/通道切块、K-major 权重打包、公开模型 golden 生成与回归脚本 |
+| `tools/` | ONNX 转换器、训练后量化（PTQ）、空间/通道切块、层间融合与 K-major 权重打包工具链 |
 | `design/` | 架构、数据通路、离线二进制接口与 CSR 寄存器规格文档 |
 | `csim/` | 逐比特精确 C 参考模拟器 `npu_sim`（累加位宽、舍入与截断行为与 RTL 严格一致） |
 | `rtl/` | 零黑盒可综合 Verilog-2005 实现（控制器、DMA、64-lane Row 计算核、8-lane PPU、四库宽口 SRAM）及 156 项 cocotb 测试 |
@@ -179,16 +179,13 @@ Elementwise Add 同样采用 **每拍 8 路（16 个乘法器）** 与 PPU 流�
 常用回归入口：
 
 ```bash
-# 跑单个公开代号模型的全链路（转换 + CSIM golden + 固件编译 + Verilator SoC 仿真）
+# 打包器与 C 参考模拟器自检
+python3 tools/model_packer.py test
+
+# 跑单个公开代号模型的 SoC Verilator 整网链式推理
 soc/run_model_e2e.sh model_c_int8
 soc/run_model_e2e.sh model_e_int8
 soc/run_model_e2e.sh model_s_int8
-
-# 跑公开 6 格矩阵（余弦门 + SoC RTL bit-exact 门）
-python3 tools/internal/phase1_model_matrix.py --rtl
-
-# 跑全套门禁回归（单元测试 + 转换器守卫 + RTL cocotb + 公开矩阵）
-python3 tools/internal/phase1_regression.py --mode quick
 ```
 
 ---
@@ -207,7 +204,6 @@ python3 tools/internal/phase1_regression.py --mode quick
 **工具链与仿真（`tools/`、`csim/`、`soc/`）**：
 - `tools/onnx_converter.py` — ONNX 图归一化、PTQ 量化、切块与 `NPU1` 生成
 - `tools/model_packer.py` — `NPU1` 描述符与 K-major 权重打包
-- `tools/tiling.py` / `tools/layer_fusion.py` / `tools/hw_config.py` — 硬件约束感知切块与层间融合分析
-- `tools/internal/gen/model_{c,e,s}_int{8,16}_golden.py` — 公开模型逐层 golden 生成脚本
+- `tools/tiling.py` / `tools/layer_fusion.py` / `tools/super_tile.py` / `tools/hw_config.py` — 硬件约束感知切块与层间融合分析
 - `csim/src/` — C 参考模拟器实现
 - `soc/firmware/main.c` / `soc/firmware/gen_soc_test.py` / `soc/run_model_e2e.sh` — RISC-V SoC 链式验证固件与一键运行脚本

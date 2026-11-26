@@ -19,43 +19,34 @@
 ### 编译 C 参考仿真器（CSIM）
 
 ```bash
-cd /data/sam/open-npu/csim
+cd csim
 make clean all test    # 默认配置: 64-lane MAC Row, 44-bit 累加器, INT8+INT16
 ```
 
 ---
 
-## 2. 快速自检（内置合成网络与门禁）
+## 2. 快速自检（打包器与 CSIM 一致性）
 
-无需外部数据文件，直接验证打包器、转换器守卫与 CSIM 逐比特一致性：
+无需外部数据文件，直接验证 `NPU1` 二进制打包器与 CSIM 逐比特一致性：
 
 ```bash
-cd /data/sam/open-npu/tools
+cd tools
 python3 model_packer.py test
-python3 internal/tests/test_phase1_guards.py
-python3 internal/tests/synth_dw_e2e.py
 ```
 
 预期输出：
 ```
-BIT-EXACT match! (10 elements)
-SUCCESS: Synthetic 12-layer DW+PW inference verified!
+ALL TESTS PASSED
 ```
-
-`tools/internal/tests/` 下的回归测试脚本：
-- `synth_dw_e2e.py` — 12 层合成深度可分离卷积链（Conv + DW + PW + GAP + FC）
-- `synth_res_e2e.py` — 31 层合成残差卷积链（含双分支 Add）
-- `synth_ms_e2e.py` — 多尺度分支拼接合成网络（MaxPool + Resize + Concat）
-- `int16_e2e.py` — INT16 端到端转换与仿真验证
 
 ---
 
-## 3. 完整工作流：ONNX -> NPU1 -> CSIM 推理与精度评估
+## 3. 完整工作流：ONNX -> NPU1 -> CSIM 推理
 
 ### 3.1 模型转换与训练后量化（PTQ）
 
 ```bash
-cd /data/sam/open-npu/tools
+cd tools
 
 # INT8 量化
 python3 onnx_converter.py \
@@ -94,45 +85,34 @@ python3 onnx_converter.py \
 - `model_e_int8.npu1_input.bin` — 量化后的输入张量
 - `model_e_int8.npu1_meta.npz` — 量化元数据（输入/输出 scale、形状等）
 
-### 3.2 CSIM 仿真推理與余弦相似度对比
+### 3.2 CSIM 仿真推理
 
 ```bash
-# 运行 CSIM
-/data/sam/open-npu/csim/npu_sim \
+../csim/npu_sim \
     model_e_int8.npu1.bin \
     model_e_int8.npu1_input.bin \
     output.bin
-
-# 与 ONNX Runtime FP32 结果比对余弦相似度
-python3 internal/compare.py \
-    --model ./model_e.onnx \
-    --input ./sample_input.bin \
-    --npu-output output.bin \
-    --meta model_e_int8.npu1_meta.npz
 ```
 
 ---
 
-## 4. 生成逐层 Golden 并运行 RTL / SoC 验证
+## 4. RTL 与 RISC-V SoC 端到端验证
 
 ### 4.1 公开基准模型一键 SoC 端到端验证
 
-公开回归矩阵包含 `model_c`、`model_e`、`model_s` 三个代号模型（各含 INT8 与 INT16 两种精度）：
+公开回归覆盖 `model_c`、`model_e`、`model_s` 三个代号模型（各含 INT8 与 INT16 两种精度）：
 
 ```bash
-# 一键完成：当场生成 CSIM 逐层 golden -> 打包固件 -> Verilator SoC 整网链式比对
-/data/sam/open-npu/soc/run_model_e2e.sh model_c_int8
-/data/sam/open-npu/soc/run_model_e2e.sh model_e_int8
-/data/sam/open-npu/soc/run_model_e2e.sh model_s_int8
-
-# 批量跑公开模型矩阵（余弦门 + SoC RTL 逐 word bit-exact 门）
-python3 /data/sam/open-npu/tools/internal/phase1_model_matrix.py --rtl
+# 打包固件并运行 Verilator SoC 整网链式比对
+./soc/run_model_e2e.sh model_c_int8
+./soc/run_model_e2e.sh model_e_int8
+./soc/run_model_e2e.sh model_s_int8
 ```
 
 ### 4.2 RTL cocotb 模块与集成回归
 
 ```bash
-cd /data/sam/open-npu/rtl/tb
+cd rtl/tb
 
 # 单模块测试
 make unit_csr
@@ -150,7 +130,7 @@ make e2e
 
 ## 5. 驱动 SDK（Bare-metal / FreeRTOS）
 
-驱动位于 `/data/sam/open-npu/driver/`，直接解析 `NPU1` 模型结构并驱动 Wishbone CSR：
+驱动位于 `driver/`，直接解析 `NPU1` 模型结构并驱动 Wishbone CSR：
 
 ```bash
 riscv32-unknown-elf-gcc -Wall -std=c11 -ffreestanding \
