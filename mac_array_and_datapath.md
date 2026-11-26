@@ -1,355 +1,141 @@
-# MAC 阵列与数据进入路径
+# 64-Lane MAC 行引擎与数据通路详解
 
-本文描述 **当前 RTL 实际怎么把数送进脉动阵列、阵列里怎么乘加、结果怎么出来**。以 `rtl/src/` 为准，默认 `ARRAY_SIZE=8`、`ACC_WIDTH=44`、计算口 256-bit。
+本文档描述 **当前可综合 RTL（`rtl/src/`）实际如何从 512-bit SRAM 取数、如何在 64-lane 行引擎中完成稠密与深度卷积乘加、以及如何经 8-lane PPU 写回片上存储**。
 
-相关文件：
+对应源文件：
 
 | 模块 | 文件 | 职责 |
 |---|---|---|
-| 顶层 + SRAM 互联 | `rtl/src/npu_top.v` | IFM / OFM / WGT / PARAM，DMA 与计算分口 |
-| 计算序列器 | `rtl/src/npu_compute.v` | 寻址、拼向量、灌权、收 psum、PPU |
-| 脉动阵列 | `rtl/src/npu_systolic.v` | 斜切 + PE 网格 + 列向归约 |
-| 单个 PE | `rtl/src/npu_pe.v` | 驻留一个权，一拍一次 MAC |
-| 宽口 SRAM | `rtl/src/npu_sram_wide.v` | A 口 32-bit（DMA），B 口读 256-bit / 写 32-bit |
-
-层调度、DDR DMA、融合换 bank 在 `npu_ctrl.v` / `npu_dma.v`。本文只在需要时提到它们，不展开控制器。
+| 顶层与四库 SRAM 互联 | `rtl/src/npu_top.v` | 例化 `IFM / OFM / WGT / PARAM` 四块 512-bit 宽口 SRAM，管理双缓冲与跨层 bank 互换 |
+| 计算微定序器与行引擎 | `rtl/src/npu_compute.v` | 激活 gather、64-bank 单写口缓冲、64-lane MAC 行、DW 折叠复用、Pool / Add / Resize |
+| 后处理单元组 | `rtl/src/npu_ppu_bank.v` + `npu_ppu.v` | 8 条并行 4 级后处理流水线（`PPU_LANES = 8`），分 8 拍排空 64 路累加结果 |
+| 宽口双端口 SRAM | `rtl/src/npu_sram_wide.v` | A 口 32-bit（DMA 侧），B 口 512-bit 读 / 按字节掩码写（计算侧） |
 
 ---
 
-## 1. 它在整颗 NPU 里的位置
+## 1. 计算核在整颗 NPU 中的位置
 
 ```
                     Wishbone 32-bit
-         CPU ──slave──▶ CSR ──▶ npu_ctrl ──start/cfg──▶ npu_compute
-         DMA ──master─▶ DDR
+         CPU ──slave──▶ npu_csr ──▶ npu_ctrl ──start/cfg──▶ npu_compute
+         npu_dma ──master─▶ DDR
           │
-          │ Port A 32-bit
+          │ Port A (32-bit)
           ▼
     ┌──────────┬──────────┬──────────┬──────────┐
-    │ IFM SRAM │ OFM SRAM │ WGT SRAM │ PARAM    │
-    │ u_sram   │ u_sram   │          │ SRAM     │
-    │ _act     │ _ofm     │          │          │
+    │ IFM SRAM │ OFM SRAM │ WGT SRAM │ PRM SRAM │
+    │  32 KiB  │  48 KiB  │  80 KiB  │  12 KiB  │
     └────┬─────┴────┬─────┴────┬─────┴────┬─────┘
-         │ Port B   │ Port B   │ Port B   │ 32-bit
-         │ 256-bit  │ 256/32   │ 256-bit  │
-         │          │          │          │
+         │ Port B   │ Port B   │ Port B   │ Port B
+         │ 512-bit  │ 512-bit  │ 512-bit  │ 512-bit
          └──────────┴────┬─────┴──────────┘
                          ▼
                    npu_compute
-                    │         │
-            sa_wgt  │         │ sa_act  (每拍最多 ARRAY 个 DATA_W)
-            sa_cmd  │         │
-                    ▼         ▼
-                 ┌─────────────────┐
-                 │  npu_systolic   │  ARRAY × ARRAY PE
-                 │  weight-stat.   │
-                 └────────┬────────┘
-                          │ psum_out  (ROWS 拍后，COLS 路 ACC_W)
-                          ▼
-                    px_acc_buf (双 bank)
-                          ▼
-                       npu_ppu × COLS
-                          ▼
-                      OFM SRAM (32-bit 写)
+      ┌──────────────────┼──────────────────┐
+      ▼                  ▼                  ▼
+  abuf / avec        wrow_b[0..31]      Pool / Add /
+ (64 单写口 bank)   (64 单写口 bank)     Resize 通路
+      │                  │
+      └────────┬─────────┘
+               ▼
+     64-Lane MAC Row Engine
+   (16x16 有符号乘法 x 64 路)
+               │
+               ▼
+       racc[0..63] (44-bit)
+               │  每拍选 8 路送入 PPU
+               ▼
+       npu_ppu_bank (8 Lanes)
+               │
+               ▼
+       OFM SRAM (512-bit 掩码写)
 ```
 
-约定：
-
-- **行 r**：展平后的 K 维切片（`k = kh × kw × IC` 里的第 r 个）。
-- **列 c**：当前 `oc_group` 里的第 c 个输出通道。
-- **`PE[r][c]`** 驻留 `W[k=r][oc=c]`，计算期间权不动（weight-stationary）。
-- 峰值：每拍最多 `ARRAY × ARRAY` 次 MAC。默认 8×8 = **64 MAC/拍**。
-
-INT8 / INT16 共用同一套 PE 乘法器（`DATA_WIDTH=16`）。没有「INT8 拆成两路 MAC」的双倍吞吐。
+核心架构特征：
+- **无二维脉动阵列与斜切延迟**：早期 2D 脉动阵列（`npu_systolic.v` / `npu_pe.v`）及独立深度卷积阵列（`npu_dw_conv.v` / `npu_dw_bank.v`）均已退役，全部乘加算子统一收敛到单拍无气泡的 **64-lane 一维行引擎**。
+- **峰值算力**：每拍完成 `64` 次 `16x16 -> 32` 有符号乘加并累加进 44-bit 寄存器 `racc[0..63]`（INT8 操作数符号扩展至 16-bit 共用同一乘法器）。
 
 ---
 
-## 2. 片上四块 SRAM（数据从哪来）
+## 2. 四块 512-bit 片上 SRAM 与单写口分库缓冲
 
-`SPAD_KB=192` 时深度（32-bit word）：
+### 2.1 四库 Scratchpad（`SPAD_KB = 172`）
 
-| Bank | 例化 | 深度 | 约合 | A 口（DMA） | B 口（计算） |
+| 物理库 | 实例名 | 深度（32-bit word） | 容量 | A 口（DMA） | B 口（Compute） |
 |---|---|---|---|---|---|
-| IFM | `u_sram_act` | `SPAD×64` | 48 KB | 32-bit 写入（load act） | **256-bit 读** |
-| OFM | `u_sram_ofm` | `SPAD×64` | 48 KB | 32-bit 读出（store） | 256-bit RMW 读 + **32-bit 写** |
-| WGT | `u_sram_wgt` | `SPAD×128` | 96 KB | 32-bit 写入 | **256-bit 读** |
-| PARAM | `u_sram_param` | `SPAD×16` | 12 KB | 32-bit | 32-bit 读（bias / scale / shift / zp） |
+| IFM | `u_sram_act` | `8,192` | `32 KiB` | 32-bit 写 | 512-bit 读（每拍 64 字节） |
+| OFM | `u_sram_ofm` | `12,288` | `48 KiB` | 32-bit 读 | 512-bit 读 + 64-byte 掩码写 |
+| WGT | `u_sram_wgt` | `20,480` | `80 KiB` | 32-bit 写 | 512-bit 读（每拍 64 个 INT8 或 32 个 INT16 权重） |
+| PARAM | `u_sram_param` | `3,072` | `12 KiB` | 32-bit 写 | 512-bit 读（支持 ping/pong 预取） |
 
-融合层可用 `act_role_swap` 把两块物理 IFM/OFM 对调，下一层直接读上一层写过的 bank，不必 memcpy。
+SRAM 为同步读（发出读地址后下一拍锁存输出，计算侧按标准两拍流水消费），综合时直接映射为目标工艺 SRAM / BRAM（Yosys 下为 4 个 `$mem_v2`）。
 
-**256-bit beat**：从 `b_addr` 起连续 8 个 32-bit word。INT8 一拍最多 32 个数，INT16 最多 16 个。SRAM 同步读，**发出地址后第 2 拍数据稳定**（issue → wait → 可用）。跳过 wait 会读到上一拍。
+### 2.2 消除多写口爆炸：`wrow / abuf / avec` 64-Bank 单写口结构
 
-布局按 **NHWC**（或 tile 内同等打包）：同一像素的通道连续，下一像素紧挨着。这是 1×1 / 单 tap 能「一拍喂满一行」的前提。
+为了支持零黑盒硬件综合并彻底消除 `1024` 路动态多写口 MUX，`npu_compute.v` 内部的三组核心暂存区均拆分为 **64 个独立的深度 32、位宽 16-bit 单写口 Bank**（总计 `3 x 64 x 32 x 16 = 98,304` bit，连同辅助缓冲共 `102,400` bit `$mem_v2`）：
 
----
-
-## 3. 阵列内部：权驻留 + 行广播 + 列向 psum
-
-### 3.1 一个 PE
-
-```
-                    weight_reg  ◀── WGT_LOAD 时锁存
-                         │
-    act_in ──▶ × ────────┤
-                         ▼
-              psum_in ──▶ + ──▶ psum_out   (ACC_W=44)
-                         │
-                    psum_valid_out
-```
-
-`npu_pe.v`：COMPUTE 且 `valid_in` 时
-
-```
-psum_out <= psum_in + act_in * weight_reg
-```
-
-PE **不跨像素自累加**。K 维归约完全靠列上的 psum 链。多 pass 的部分和累加在阵列外的 `px_acc_buf`。
-
-### 3.2 网格连线（8×8 示意）
-
-```
-              列0 (oc0)     列1 (oc1)     …    列7 (oc7)
-            ┌──────────┐ ┌──────────┐      ┌──────────┐
-  行0  act0 │ PE00     │ │ PE01     │      │ PE07     │
-  (k0) ═════╡ ×W00     │ │ ×W01     │      │ ×W07     │   ← 同行广播同一 act
-            │ +0       │ │ +0       │      │ +0       │
-            └───┬──────┘ └───┬──────┘      └───┬──────┘
-                ▼ psum       ▼                 ▼
-            ┌──────────┐ ┌──────────┐      ┌──────────┐
-  行1  act1 │ PE10     │ │ PE11     │      │ PE17     │
-  (k1) ═════╡ ×W10     │ │ ×W11     │      │ ×W17     │
-            │ +psum    │ │ +psum    │      │ +psum    │
-            └───┬──────┘ └───┬──────┘      └───┬──────┘
-                ▼            ▼                 ▼
-               …            …                 …
-                ▼            ▼                 ▼
-            ┌──────────┐ ┌──────────┐      ┌──────────┐
-  行7  act7 │ PE70     │ │ PE71     │      │ PE77     │
-  (k7) ═════╡          │ │          │      │          │
-            └───┬──────┘ └───┬──────┘      └───┬──────┘
-                ▼            ▼                 ▼
-           psum[oc0]    psum[oc1]         psum[oc7]     同一拍 COLS 路点积
-```
-
-- 激活：**行内广播**，列与列之间没有横向链路。
-- 部分和：**自上而下**。行 0 的 `psum_in = 0`，底行吐出
-
-  `((((0+a0·w0)+a1·w1)+…)+a7·w7)`
-
-  与旧的阵列外加法树同序、同位宽，bit-exact。
-
-### 3.3 为什么要斜切（skew）
-
-列上的 psum 每过一行花 1 拍。行 r 的 `a[r]·W[r]` 必须和上面传下来的部分和在同一拍相遇。因此：
-
-- `npu_compute` 一拍送出**未斜切**的整向量 `sa_act_data[0..ROWS-1]`，`sa_act_valid` 一拍。
-- `npu_systolic` 里行 r 把 `act[r]` 推迟 **r** 拍（三角寄存器，共 `ROWS×(ROWS-1)/2` 个 `DATA_W`）。
-- 行 0 直通。结果在 **`sa_act_valid` 之后第 ROWS 拍** 从底行出现（`psum_out_valid`）。
-
-默认 8 行：喂向量与收点积隔 **8 拍**。飞行中最多 `ARRAY_SIZE` 个向量（`IF_DEPTH = ARRAY_SIZE`）。
-
-```
-拍   送入阵列的向量          底行吐出
- t    V0 (像素0, pass p)
- t+1  V1
- ...
- t+7  V7
- t+8  V8                     V0 的 COLS 路 psum
- t+9                         V1
-```
-
-阵列一旦进入 COMPUTE，每拍都能再收一个向量（`ready` 在 COMPUTE 也为 1）。不必每个像素重新 `sa_cmd`。
-
-### 3.4 灌权重
-
-一列一拍：
-
-1. `npu_compute` 从 WGT SRAM 读 256-bit，解出该列的 `ROWS` 个权，放到 `sa_wgt_data[0..ROWS-1]`。
-2. `sa_wgt_valid` 脉冲，阵列按 `wgt_col_cnt` 只让 **一列** PE 锁存。
-3. 重复 COLS 拍，整阵驻留一组 `ROWS × COLS` 权，对应当前 `k_pass`。
-
-之后同一 `k_pass` 上，一块空间像素（最多 16 个）复用这组权。下一块若 `wgt_held` 且第一趟仍是这组权，可跳过再灌（驻留 skip）。影子缓冲 `wgt_sh` 可在算的时候预取下一趟权。
+1. `wrow_b[0..31][0..63]`：缓存 K-major 权重步或 Depthwise 卷积核权重（最多 `32 x 64` 个 16-bit 槽位）。
+2. `abuf_b[0..31][0..63]`：缓存当前像素块从 IFM 预取的激活窗口数据。
+3. `avec_b[0..31][0..63]`：缓存重排对齐后的待发射激活向量；边界 padding 元素按单拍顺序填 `cfg_in_zp`，无动态移位写端口。
 
 ---
 
-## 4. 计算循环（谁决定送哪个向量）
+## 3. 稠密卷积与全连接（Conv2D / FC）数据流
 
-`npu_compute` 外→内：
+### 3.1 K-Major 广播乘加
+
+设展平归约维度 `K = kernel_h * kernel_w * in_c`：
+- **满宽输出通道（`G = 64`）**：
+  - 对于每一个 `k in [0, K - 1]`，WGT SRAM 的一个 512-bit beat 恰好提供当前 OC 组 64 个输出通道在下标 `k` 处的 INT8 权重 `W[k][0..63]`（INT16 模式下分两拍读入 64 个 16-bit 权重）。
+  - 同一拍取当前输出像素在下标 `k` 处的激活标量 `a[k]`，向全部 64 条 lane 广播：
+    `racc[c] <= racc[c] + a[k] * W[k][c]`（`c = 0..63`）。
+- **窄输出通道多像素打包（`G < 64`）**：
+  - 当层输出通道较少（例如 `G = 16` 或 `G = 32`）时，若只算 1 个像素，64 条 lane 会闲置大半。
+  - 行引擎自动开启像素打包（`P = 64 / G`）：同一拍将 `P` 个相邻输出像素各自的 `a_p[k]` 分别广播到对应的 `G` 条通道子组中，与同一组 `G` 个通道权重并行相乘，使窄通道层同样打满 `64 MACs/cycle`。
+
+### 3.2 循环层次
 
 ```
-tile_y → tile_x → oc_group → 空间块(最多 16 像素) → k_pass → 块内像素
+tile_y -> tile_x -> oc_group (每组最多 64 通道) -> 像素微块 -> k = 0 .. K-1 -> 8-lane PPU 排空写回
 ```
 
-- `k_depth = kh × kw × IC`
-- `k_pass_max = ⌈k_depth / ARRAY⌉ − 1`
-- 一趟 `k_pass` 喂 `k_pass_remain`（通常 = ARRAY）个 K 槽，对应阵列的一行宽。
-- `oc_group` 一次最多 ARRAY 个输出通道；`OC > ARRAY` 再切一组，重装权。
-- 空间块：`blk_px_cnt ≤ 16`。`px_acc_buf[0:511]` 按 `{bank, px[3:0], col[3:0]}`，双 bank：一块在累加，上一块 PPU 可读。
-
-K 下标展平：
-
-```
-flat = fh × (kw × IC) + fw × IC + ch
-pass 起点 = k_pass × ARRAY
-→ (pass_fh, pass_fw, pass_ch)
-```
-
-1×1：`fh=fw=0`，`ch = k_pass × ARRAY`。  
-3×3：通道走完再动 `fw`，再动 `fh`。
+当 `out_c` 对应的总权重超出 `80 KiB` WGT SRAM 时，`npu_ctrl` 利用 `oc_group_done` / `wgt_reload_done` 握手按 `cfg_wgt_per_oc` 自动从主存重载下一组输出通道权重。
 
 ---
 
-## 5. 激活怎么进阵列（核心）
+## 4. Depthwise Conv2D 的折叠复用路径
 
-### 5.1 从地址到 `sa_act_valid`
+Depthwise 卷积每个通道独立在 `kernel_h * kernel_w` 窗口上乘加，不再设置专用 `npu_dw_conv` 乘法器或触发器权重阵列，而是完全折叠到行引擎既有资源上：
 
-```
-  输出像素 (oh, ow) 当前 tap (fh, fw, ch)
-           │
-           ▼
-  ih = oh×stride_h − pad_top + fh
-  iw = ow×stride_w − pad_left + fw
-           │
-     ┌─────┴──────┐
-     │ 越界？      │ 是 → act_buf 填 in_zp，不读 SRAM
-     └─────┬──────┘
-           │ 否
-           ▼
-  elem = ih×W×IC + iw×IC + ch     (非 tile)
-       或 tile 内等价公式
-  byte = INT16 ? elem×2 : elem
-  word = act_base + byte[17:2]
-           │
-           ▼
-  ACT_LOAD：act_rd_en / act_rd_addr
-  等 2 拍 ──▶ 256-bit beat
-           │
-           ▼
-  ACT_EMIT：按 act_byte_sel 对齐，从 beat 里取出连续通道
-            填 sa_act_data[0 .. npack-1]，其余 lane 清 0
-            拼满 k_pass_remain → sa_act_valid=1
-```
-
-`npack` 受三件事裁剪：beat 里剩下的元素、本 tap 还剩的通道、本 pass 还剩的 K 槽。对齐且 `IC` 够时，**一拍就能填满 ARRAY 路**。
-
-### 5.2 单 tap 快路径（1×1，以及 IC 盖得住的 3×3）
-
-若一整趟 `k_pass` 都在同一个 `(fh,fw)`（`pass_ch + k_pass_remain ≤ IC`）：
-
-1. **少 1 拍采样**：`ACT_LOAD` 在 wait 那拍就进 `EMIT`，用 `act_use_rd` 直接吃 `act_rd_data`（issue 后第 2 拍）。
-2. **2-ahead**：wait 拍已发下一像素同一 tap 的读；`EMIT` 再发下下个。稳态可以 **1 向量/拍** 留在 `S_ACT_EMIT`。
-3. **跳过 `SPATIAL_SETUP` + `ACT_CMD`**：块内下一像素地址用 `conv_tap_byte(oh,ow,pass_fh,pass_fw,pass_ch)` 当场算。
-4. 最后像素可直接去 `PSUM_COLLECT`，不必再 `FLUSH`。
-
-3×3 的 pad 按 **这个 tap** 的 `(ih,iw)` 判断，不是输出中心。下一像素若该 tap 是 pad，`ahead_pad=1`，不误用上一拍数据。
-
-跨 tap 的 pass（例如 `IC=1, k=3`，一趟要扫多个窗位）**不走**快路径，仍是：
-
-`SETUP → CMD → LOAD(3 拍) → EMIT → 下一 tap 或 FLUSH → SETUP`
-
-### 5.3 慢路径（跨 tap / 不对齐 / deconv）
-
-每个向量：
-
-| 状态 | 典型拍数 | 做什么 |
-|---|---|---|
-| `S_SPATIAL_SETUP` | 1 | 窗原点 + 分解 `(fh,fw,ch)` |
-| `S_ACT_CMD` | 1+ | 算 word 地址；首像素发 `MODE_COMPUTE` |
-| `S_ACT_LOAD` | 3（有效）或 1（pad） | SRAM issue / wait / 采样进 `act_buf` |
-| `S_ACT_EMIT` | ≥1 | 拼 lane，满则 `sa_act_valid` |
-| `S_ACT_FLUSH` | 1 | 记 in-flight，下像素回 SETUP |
-
-这就是 3×3 在快路径之前 `ACT_LOAD` 能占到 34% 周期的原因：每个 (像素, pass) 都重新握手。
-
-### 5.4 飞行 FIFO
-
-`sa_act_valid` 时把 `(px_in_blk, k_pass)` 推进深度 `ARRAY` 的 FIFO。底行 `psum_out_valid` 时弹出，按 `if_kp == k_first` **覆盖**或**累加**进 `px_acc_buf`。
-
-- 第一趟（或块内约定的 `k_first`）：写入。
-- 其后各趟：加到已有部分和。
-
-FIFO 满则 `EMIT` 停（`if_full`），避免超过阵列延迟。这是 1×1 `ACT_EMIT` 里多出来那十几拍的来源。
+1. **权重驻留复用 `wrow_b`**：当前 8 通道组的卷积核权重（最大支持 `256` 个核元素，覆盖 `7x7` 乃至更大核）直接加载进 `wrow_b[0..31][0..63]`。
+2. **乘加累加复用 `racc[0..7]`**：滑窗扫描每个核位置 `(fh, fw)` 时，同时取出当前 8 个通道的激活与 `wrow_b` 中对应的 8 个权重做乘加，累加在 `racc[0..7]` 中。
+3. **后处理直通 8-Lane PPU**：窗口结束后，`racc[0..7]` 恰好对应 `npu_ppu_bank` 的 8 条并行流水线，单拍送入 PPU 完成偏置、乘移重量化与写回。
+4. **全局 DW 流式切片**：当 `kernel_h == in_h` 且 `kernel_w == in_w`（输出 `1x1xC`）且整张输入特征图大于 IFM SRAM 时，`npu_ctrl` 自动按 16 通道切片流式加载激活与权重，输出暂存在 OFM 高地址区 `DW_STREAM_OUT_BASE`，无需片上容纳整张特征图。
 
 ---
 
-## 6. 一条完整「灌权 → 喂数 → 收数」时间线
+## 5. 8-Lane 分时复用 PPU 与算子协同
 
-默认 8×8，1×1，`IC=16`（2 个 pass），一块 16 像素，单 tap 快路径：
+### 5.1 为什么 PPU 采用 8-Lane 而非 64-Lane
 
-```
-WGT_CMD / WGT_LOAD / WGT_EMIT × 8     灌 pass 0 的 8 列权
-ACT_CMD                               首像素，阵列进 COMPUTE
-ACT_LOAD (2 拍，并发下一像素)
-ACT_EMIT ── 16 个像素，约 1 拍/向量 ──▶ 阵列每拍 64 MAC
-          8 拍后 psum 回流，累加进 bank
-PSUM_COLLECT                          等 FIFO 排空
-（下一 pass：驻留或再灌权，再扫 16 像素）
-最后一趟齐 → PPU 读 bank、量化、写 OFM
-  非最后一块：ppu_bg=1，与下一块灌权/计算重叠
-```
+64-lane 行引擎在 `K` 维归约期间需要连续累加数十至数千拍才产出一组 64 个输出累加值（例如 `3x3x64` 卷积需 `K = 576` 拍）。因此写回带宽需求远低于乘加带宽：
+- 例化 8 条 4 级流水 `npu_ppu`（`PPU_LANES = 8`），仅需 **8 拍** 即可排空 `racc[0..63]`，占典型卷积块周期不到 `2%`；
+- 直接省去 `56` 条 60-bit 乘法-移位-钳位流水线，显著压缩组合逻辑与寄存器面积。
 
-3×3、`IC=16`：每 pass 仍是「一个 tap 上的 8 个通道」，快路径与 1×1 相同，只是地址带 `(fh,fw)`。`IC=1` 的 3×3 无法单 tap 填满一行，仍走慢 gather。
+### 5.2 Elementwise Add 与 Pooling 精简通路
+
+- **8-Lane 流水 Add**：双分支残差相加每拍处理 8 个通道（共 16 个缩放乘法器），直接与 8-lane PPU 截断写回流水重叠，无需单独的 `add_vec_out` 整行暂存寄存器。
+- **Pooling + 40 拍串行倒数器**：AvgPool 在进入空间循环前，用 40 拍恢复余数状态机算出 `round(2^16 / pool_area)`（17-bit 定点倒数），窗口求和后做单次乘法右移即可得到均值，整芯片无任何组合除法器。
 
 ---
 
-## 7. 结果离开阵列之后
+## 6. 利用率与性能观测口径
 
-```
-psum_out[c]  ──▶  px_acc_buf[bank][px][c]     (多 pass 累加)
-                      │
-                      │ 块结束，切 bank
-                      ▼
-              PPU × COLS（bias / requant / ReLU / zp …）
-                      │
-                      ▼
-              OFM SRAM 32-bit 打包写
-                      │
-                      ▼
-              DMA store → DDR   （或 fusion：对调成下一层 IFM）
-```
+`npu_csr.v` 内置细粒度硬件周期直方图（`0x01C-0x03C` 与 `0x1A0-0x1D0`），可直接从寄存器读出单层或整网的周期去向：
 
-PARAM 可在灌权时预填。最后一块的 PPU 不能和下一块计算重叠，会暴露在 `S_PPU_STREAM`。
+- `0x01C PERF_CNT`：总墙钟周期（含主存 DMA 与计算）
+- `0x020 MAC_CNT`：有效 MAC 次数
+- `0x034 / 0x038 / 0x03C`：DMA 周期 / Compute 周期 / DMA-Compute 重叠周期
+- `0x1A0-0x1D0`：计算微状态机在 `MAC 发射 / 等待激活 / 等待权重 / 等待双缓冲 / PPU 写回 / Pool / Add / Resize` 各阶段的精确拍数统计
 
-Depthwise **不进**这张阵列，走 `npu_dw_conv`。
-
----
-
-## 8. 和「利用率」怎么对上
-
-口径（`rtl/tb/integration/test_array_util.py`）：
-
-```
-有用 MAC = Σ (sa_act_valid 时非零 lane 数) × COLS
-峰值     = 总周期 × ROWS × COLS
-利用率   = 有用 / 峰值
-```
-
-只统计 **compute 段**（数据已在 SRAM），不含 DDR DMA。
-
-`8×8×16→16`、阵列 8，当前实测大约：
-
-| 层 | 周期 | 利用率 | 喂数时 lane |
-|---|---|---|---|
-| 1×1 | 742 | **34.5%** | 8.00 / 8 |
-| 3×3 | 6510 | **29.7%** | 6.72 / 8（pad 的零 lane） |
-
-喂数拍本身是满的（或仅 pad 空）。空拍在块头灌权、`PSUM_COLLECT`、最后 PPU、以及未走快路径的 gather。这是序列器 + 16 像素切块的税，不是 PE 乘错。
-
-整网 A/D 再叠上 32-bit 片外总线和层间 DMA 后，墙钟还会被 **字节** 卡住，和这篇里的阵列忙闲不是同一层。
-
----
-
-## 9. 对照：阵列「看到」的是什么
-
-阵列接口非常窄。它不理解卷积窗：
-
-| 信号 | 含义 |
-|---|---|
-| `cmd` / `cmd_valid` | IDLE / WGT_LOAD / COMPUTE |
-| `wgt_data[r]` + `wgt_valid` | 当前列的一行权 |
-| `act_data[r]` + `act_valid` | 当前像素当前 pass 的 K 向量 |
-| `psum_out[c]` + `psum_out_valid` | 该向量对 COLS 个 OC 的点积 |
-
-窗、pad、NHWC、k_pass、16 点块、双 bank，全部在 `npu_compute`。阵列只做：
-
-**驻留一块 `ROWS×COLS` 权，每拍吃一个 K 向量，ROWS 拍后吐 COLS 路点积。**
+计算阶段实测口径见 `rtl/tb/integration/test_array_util.py` 与 `rtl/tb/run_util_sweep.sh`（默认扫描公开基准模型 `a / c / e`）。

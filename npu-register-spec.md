@@ -1,9 +1,9 @@
 # Open-NPU CSR 寄存器规格
 
-> 版本：V1.0 Draft
-> 日期：2025-05-19
-> 总线：Wishbone Slave，32-bit数据宽度，字节寻址
-> 地址空间：4KB (0x000 - 0xFFF)
+> 版本：V1.3
+> 更新：2026-11-26
+> 总线：Wishbone-B4 Slave，32-bit 数据宽度，字节寻址（单周期应答）
+> 地址空间：4 KB (`0x000 - 0xFFF`)，与 `rtl/src/npu_csr.v` 严格一致
 
 ---
 
@@ -12,747 +12,251 @@
 | 参数 | 值 |
 |------|-----|
 | 数据宽度 | 32-bit |
-| 寻址方式 | 字节地址，4字节对齐（bit[1:0]忽略） |
-| 地址空间 | 4KB (1024个寄存器位置) |
-| 字节序 | 小端 (Little-Endian) |
-| 默认值 | 复位后所有寄存器为0（除VERSION/CONFIG只读寄存器） |
+| 寻址方式 | 字节地址，4 字节对齐（`addr[1:0]` 忽略） |
+| 地址空间 | 4 KB |
+| 字节序 | 小端（Little-Endian） |
+| 复位默认值 | 所有可写寄存器复位为 `0`；只读标识寄存器返回固定硬件常量 |
 
 ### 访问类型
 
 | 缩写 | 含义 |
 |------|------|
-| RW | 读写 |
-| RO | 只读（硬件写入，软件只能读） |
-| W1C | 写1清零 |
-| WO | 只写（读返回0） |
+| `RW` | 读写寄存器 |
+| `RO` | 只读寄存器（写操作忽略） |
+| `W1C` | 写 `1` 清零 |
+| `SC` | 自清零控制位（写 `1` 产生单拍脉冲，读回 `0`） |
 
 ---
 
 ## 2. 寄存器地址映射总览
 
-| 地址范围 | 组 | 用途 | 寄存器数量 |
-|---------|-----|------|-----------|
-| 0x000 - 0x03F | Group 0 | 控制与状态 | 16 |
-| 0x040 - 0x0FF | Group 1 | 层参数配置 | 48 |
-| 0x100 - 0x17F | Group 2 | DMA配置 | 32 |
-| 0x180 - 0x1FF | Group 3 | 后处理配置 | 32 |
-| 0x200 - 0x3FF | Group 4 | LUT数据 | 128 |
-| 0x400 - 0xFFF | Group 5 | 保留(V2.0扩展) | 768 |
+| 地址范围 | 分组 | 用途 |
+|---------|------|------|
+| `0x000 - 0x03F` | Group 0 | 全局控制、状态、中断与顶层性能计数 |
+| `0x040 - 0x0FF` | Group 1 | 层几何、算子模式、切块与片上 SRAM 基址 |
+| `0x100 - 0x17F` | Group 2 | DMA 地址/步长、K-major 权重布局、参数预取与 Super-Block 控制 |
+| `0x180 - 0x19F` | Group 3A | 后处理（PPU）与双分支 Add 配置 |
+| `0x1A0 - 0x1FF` | Group 3B | 计算状态机细粒度周期直方图计数器（RO） |
+| `0x200 - 0x3FF` | Group 4 | 保留（历史 LUT 激活表已裁撤，`HAS_LUT = 0`，读回 `0`） |
+| `0x400 - 0x4AF` | Group 5 | Super-Block 描述符窗口（3 个槽位 x 44 个 32-bit 字） |
+| `0x4B0 - 0xFFF` | — | 保留 |
 
 ---
 
-## 3. Group 0：控制与状态 (0x000 - 0x03F)
+## 3. Group 0：控制、状态与全局计数器 (`0x000 - 0x03F`)
 
-### 0x000 NPU_CTRL — 控制寄存器 [RW]
+### `0x000 NPU_CTRL` — 控制寄存器 `[RW/SC]`
 
-| Bit | 名称 | 复位值 | 描述 |
+| Bit | 名称 | 类型 | 描述 |
+|-----|------|------|------|
+| `[0]` | `START` | SC | 写 `1` 启动当前层推理（单拍脉冲后自动清零） |
+| `[1]` | `ABORT` | SC | 写 `1` 中止在飞计算与 DMA，并阻止 `AUTO_NEXT` 续跑 |
+| `[2]` | `SOFT_RST` | SC | 写 `1` 软复位控制器、DMA 与计算状态机（保留 CSR 与 SRAM 内容） |
+| `[3]` | `AUTO_NEXT` | RW | `1` = 当前层完成后若 `CURR_LAYER + 1 < LAYER_COUNT` 则自动启动下一层 |
+| `[31:4]` | — | RO | 保留（`0`） |
+
+### `0x004 NPU_STATUS` — 运行状态寄存器 `[RO]`
+
+| Bit | 名称 | 描述 |
+|-----|------|------|
+| `[0]` | `BUSY` | `1` = NPU 控制器或计算核忙 |
+| `[1]` | `DMA_BUSY` | `1` = DMA 引擎正在传输 |
+| `[2]` | `ERROR` | `1` = 硬件守卫或总线报错（详见 `NPU_ERROR_CODE`） |
+| `[3]` | `DONE` | 最近一次启动的层已完成脉冲/状态 |
+| `[15:8]` | `CURR_LAYER` | 当前层序号（`0 - 255`） |
+| `[31:16]` | — | 保留（`0`） |
+
+### `0x008 NPU_IRQ_EN` / `0x00C NPU_IRQ_STATUS` — 中断使能 `[RW]` 与状态 `[W1C]`
+
+| Bit | 名称 | 描述 |
+|-----|------|------|
+| `[0]` | `DONE_IRQ` | 层推理完成中断 |
+| `[1]` | `ERROR_IRQ` | 错误中断 |
+| `[2]` | `DMA_DONE_IRQ` | 单次 DMA 传输完成中断 |
+| `[31:3]` | — | 保留（`0`） |
+
+### `0x010 NPU_ERROR_CODE` — 硬件守卫错误码 `[RO]`
+
+`[3:0]` 返回 `0`（无错误）或硬件守卫码 `E1 - E9`（详见 `rtl_design_overview.md` §3）。
+
+### `0x014 NPU_VERSION` — 版本号 `[RO]`
+
+默认返回 `0x00010000`（`V1.0.0`：`[23:16]` Major，`[15:8]` Minor，`[7:0]` Patch）。
+
+### `0x018 NPU_HW_CONFIG` — 硬件能力只读寄存器 `[RO]`
+
+| Bit | 名称 | 默认值 | 描述 |
 |-----|------|--------|------|
-| [0] | START | 0 | 写1启动当前层计算（自动清零） |
-| [1] | ABORT | 0 | 写1中止当前计算（自动清零） |
-| [2] | SOFT_RST | 0 | 写1软复位NPU所有状态（自动清零） |
-| [3] | AUTO_NEXT | 0 | 1=层完成后自动加载下一层描述符并启动 |
-| [31:4] | — | 0 | 保留 |
-
-### 0x004 NPU_STATUS — 状态寄存器 [RO]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [0] | BUSY | 1=NPU正在执行计算 |
-| [1] | DMA_BUSY | 1=DMA正在搬运 |
-| [2] | ERROR | 1=发生错误（详见ERROR_CODE） |
-| [3] | DONE | 1=最近一次计算已完成 |
-| [15:8] | CURR_LAYER | 当前正在执行的层号(0-255) |
-| [31:16] | — | 保留 |
-
-### 0x008 NPU_IRQ_EN — 中断使能寄存器 [RW]
-
-| Bit | 名称 | 复位值 | 描述 |
-|-----|------|--------|------|
-| [0] | DONE_EN | 0 | 层计算完成中断使能 |
-| [1] | ERROR_EN | 0 | 错误中断使能 |
-| [2] | DMA_DONE_EN | 0 | DMA传输完成中断使能 |
-| [31:3] | — | 0 | 保留 |
-
-### 0x00C NPU_IRQ_STATUS — 中断状态寄存器 [W1C]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [0] | DONE_IRQ | 层计算完成（写1清除） |
-| [1] | ERROR_IRQ | 错误发生（写1清除） |
-| [2] | DMA_DONE_IRQ | DMA完成（写1清除） |
-| [31:3] | — | 保留 |
-
-### 0x010 NPU_ERROR_CODE — 错误码寄存器 [RO]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [3:0] | ERR_CODE | 0=无错误, 1=DMA地址越界, 2=配置非法, 3=scratchpad溢出, 4=总线超时 |
-| [31:4] | — | 保留 |
-
-### 0x014 NPU_VERSION — 版本寄存器 [RO]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [7:0] | PATCH | 补丁版本 |
-| [15:8] | MINOR | 次版本 |
-| [23:16] | MAJOR | 主版本 |
-| [31:24] | — | 保留 |
-
-复位值：0x00_01_00_00 (V1.0.0)
-
-### 0x018 NPU_HW_CONFIG — 硬件配置寄存器 [RO]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [7:0] | ARRAY_SIZE | 脉动阵列边长（16/32/64） |
-| [11:8] | NUM_ARRAYS | 阵列数量（1/2/4，用于多阵列并行扩展） |
-| [15:12] | DW_CHANNELS_LOG2 | DW模块并行通道数 = 2^N（4=16ch, 5=32ch, 6=64ch） |
-| [23:16] | SPAD_SIZE_4KB | Scratchpad总大小，单位4KB（如32=128KB, 128=512KB, max=1020KB） |
-| [24] | HAS_INT16 | 1=支持INT16 |
-| [25] | HAS_LUT | 1=支持LUT激活 |
-| [26] | HAS_IPU | 1=集成了IPU模块 |
-| [31:27] | — | 保留 |
-
-### 0x01C NPU_PERF_CNT — 性能计数器 [RO]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [31:0] | CYCLE_COUNT | 自上次START以来经过的时钟周期数 |
-
-### 0x020 NPU_MAC_CNT — MAC计数器 [RO]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [31:0] | MAC_COUNT | 实际执行的MAC操作数（用于计算利用率） |
-
-### 0x024 NPU_SERIAL_LO — 序列号低32位 [RO]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [31:0] | SERIAL_LO | 芯片唯一序列号低32位（出厂烧入eFuse/OTP） |
-
-### 0x028 NPU_SERIAL_HI — 序列号高32位 [RO]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [31:0] | SERIAL_HI | 芯片唯一序列号高32位 |
-
-合计64-bit唯一ID，可用于：
-- 软件License授权绑定（编译器/SDK绑定特定芯片）
-- 生产追溯
-- 防止仿冒（客户可验证IP来源）
-
-### 0x02C NPU_VENDOR_ID — 厂商/产品标识 [RO]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [15:0] | VENDOR_ID | 厂商ID（开源版=0x4F4E "ON" for Open-NPU） |
-| [31:16] | PRODUCT_ID | 产品型号ID（客户定制时可改） |
-
-### 0x030 NPU_LAYER_COUNT — 层数寄存器 [RW]
-
-| Bit | 名称 | 复位值 | 描述 |
-|-----|------|--------|------|
-| [7:0] | LAYER_COUNT | 0 | AUTO_NEXT 模式下的总层数。hw_curr_layer 达到此值时自动停止 |
-| [31:8] | — | 0 | 保留 |
-
-### 0x034 - 0x03F 保留
-
----
-
-## 4. Group 1：层参数配置 (0x040 - 0x0FF)
-
-### 0x040 LAYER_MODE — 层类型与模式 [RW]
-
-| Bit | 名称 | 复位值 | 描述 |
-|-----|------|--------|------|
-| [3:0] | OP_TYPE | 0 | 算子类型（见下表） |
-| [4] | DATA_TYPE | 0 | 0=INT8, 1=INT16 |
-| [5] | PINGPONG_SEL | 0 | 当前使用的activation bank (0/1) |
-| [31:6] | — | 0 | 保留 |
-
-**OP_TYPE 编码：**
-
-| 值 | 算子 | 说明 |
-|----|------|------|
-| 0 | CONV2D | 标准2D卷积 |
-| 1 | DW_CONV | Depthwise卷积 |
-| 2 | FC | 全连接（等价于1×1 conv, in_h=in_w=1） |
-| 3 | POOLING | 池化 (Max/Avg) |
-| 4 | ELTWISE_ADD | 逐元素加法 |
-| 5 | RESIZE | 上采样/下采样 |
-| 6 | DECONV | 转置卷积 |
-| 7 | CONCAT | 通道拼接 |
-| 8-15 | 保留 | V2.0扩展 |
-
-### 0x044 IN_DIM_H_W — 输入高度与宽度 [RW]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [15:0] | IN_H | 输入特征图高度 |
-| [31:16] | IN_W | 输入特征图宽度 |
-
-### 0x048 IN_DIM_C — 输入通道数 [RW]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [15:0] | IN_C | 输入通道数 |
-| [31:16] | — | 保留 |
-
-### 0x04C OUT_DIM_H_W — 输出高度与宽度 [RW]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [15:0] | OUT_H | 输出特征图高度 |
-| [31:16] | OUT_W | 输出特征图宽度 |
-
-### 0x050 OUT_DIM_C — 输出通道数 [RW]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [15:0] | OUT_C | 输出通道数 |
-| [31:16] | — | 保留 |
-
-### 0x054 KERNEL_SIZE — 卷积核尺寸 [RW]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [7:0] | KERNEL_H | 卷积核高度 (1-15) |
-| [15:8] | KERNEL_W | 卷积核宽度 (1-15) |
-| [23:16] | DILATION_H | 膨胀系数高度 (1-15, 默认1) |
-| [31:24] | DILATION_W | 膨胀系数宽度 (1-15, 默认1) |
-
-### 0x058 STRIDE — 步长 [RW]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [7:0] | STRIDE_H | 垂直步长 (1-15) |
-| [15:8] | STRIDE_W | 水平步长 (1-15) |
-| [31:16] | — | 保留 |
-
-### 0x05C PADDING — 填充 [RW]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [7:0] | PAD_TOP | 顶部padding |
-| [15:8] | PAD_BOTTOM | 底部padding |
-| [23:16] | PAD_LEFT | 左侧padding |
-| [31:24] | PAD_RIGHT | 右侧padding |
-
-### 0x060 POOL_CFG — 池化配置 [RW]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [0] | POOL_MODE | 0=MaxPool, 1=AvgPool |
-| [7:4] | POOL_H | 池化窗口高度 |
-| [11:8] | POOL_W | 池化窗口宽度 |
-| [15:12] | POOL_STRIDE_H | 池化步长高度 |
-| [19:16] | POOL_STRIDE_W | 池化步长宽度 |
-| [20] | GLOBAL_POOL | 1=全局池化(忽略POOL_H/W) |
-| [31:21] | — | 保留 |
-
-### 0x064 RESIZE_CFG — Resize配置 [RW]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [0] | RESIZE_MODE | 0=最近邻, 1=双线性 |
-| [15:8] | SCALE_H | 垂直缩放因子 (Q4.4定点: 如2.0=0x20) |
-| [23:16] | SCALE_W | 水平缩放因子 (Q4.4定点) |
-| [31:24] | — | 保留 |
-
-### 0x068 DECONV_CFG — 转置卷积配置 [RW]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [7:0] | INSERT_H | 垂直方向插零数 |
-| [15:8] | INSERT_W | 水平方向插零数 |
-| [31:16] | — | 保留 |
-
-### 0x06C CONCAT_CFG — Concat配置 [RW]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [15:0] | CONCAT_OFFSET | 拼接位置偏移(通道维度) |
-| [31:16] | CONCAT_TOTAL_C | 拼接后总通道数 |
-
-### 0x070 TILE_CFG — Tiling配置 [RW]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [15:0] | TILE_H | 当前tile的高度 |
-| [31:16] | TILE_W | 当前tile的宽度 |
-
-### 0x074 TILE_COUNT — Tile计数 [RW]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [15:0] | TILE_NUM_H | 垂直方向tile数量 |
-| [31:16] | TILE_NUM_W | 水平方向tile数量 |
-
-### 0x078 SRAM_BASE — 片上SRAM基地址 [RW]
-
-| Bit | 名称 | 复位值 | 描述 |
-|-----|------|--------|------|
-| [12:0] | ACT_BASE | 0 | 输入激活在片上Activation SRAM中的字地址偏移 |
-| [15:13] | — | 0 | 保留 |
-| [28:16] | OUT_BASE | 0 | 输出在片上Activation SRAM中的字地址偏移 |
-| [31:29] | — | 0 | 保留 |
-
-用于分离输入/输出在同一Activation SRAM中的存储区域，防止计算过程中输出覆盖输入数据。
-当设为0时输入输出共用地址0起始（向后兼容，适用于out_base在DMA阶段确定的场景）。
-
-### 0x07C - 0x0FF 保留
-
----
-
-## 5. Group 2：DMA配置 (0x100 - 0x17F)
-
-### 0x100 DMA_IN_ADDR — 输入数据基地址 [RW]
-
-| Bit | 描述 |
-|-----|------|
-| [31:0] | 输入特征图在外部SRAM中的字节地址 |
-
-### 0x104 DMA_OUT_ADDR — 输出数据基地址 [RW]
-
-| Bit | 描述 |
-|-----|------|
-| [31:0] | 输出特征图在外部SRAM中的字节地址 |
-
-### 0x108 DMA_WEIGHT_ADDR — 权重数据基地址 [RW]
-
-| Bit | 描述 |
-|-----|------|
-| [31:0] | 权重数据在外部SRAM/Flash中的字节地址 |
-
-### 0x10C DMA_PARAM_ADDR — Per-channel参数基地址 [RW]
-
-| Bit | 描述 |
-|-----|------|
-| [31:0] | Per-channel requantize参数（M/S/zp/bias）在外部SRAM的字节地址（4字节对齐） |
-
-等价于 POST_PARAM_ADDR (0x184)，两者写任一个均可（硬件共用同一寄存器，双映射便于编程）。
-
-### 0x110 DMA_IN_STRIDE — 输入数据步长 [RW]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [15:0] | IN_STRIDE_ROW | 输入相邻行之间的字节间距 |
-| [31:16] | IN_STRIDE_CH | 输入相邻通道之间的字节间距（NCHW模式用） |
-
-### 0x114 DMA_OUT_STRIDE — 输出数据步长 [RW]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [15:0] | OUT_STRIDE_ROW | 输出相邻行之间的字节间距 |
-| [31:16] | OUT_STRIDE_CH | 输出相邻通道之间的字节间距 |
-
-### 0x118 DMA_CTRL — DMA控制寄存器 [RW]
-
-> **注意**：此寄存器是 RTL 硬件 DMA 引擎的配置 CSR，与离线模型 descriptor 中的 `sched_ctrl` 字段无关。
-> 离线模型格式的调度控制位（DB_EN、FUSE_*）定义见 `design/interface-spec.md` §4。
-
-| Bit | 名称 | 复位值 | 描述 |
-|-----|------|--------|------|
-| [0] | TRANSPOSE_EN | 0 | 1=搬运时做NCHW→NHWC转置 |
-| [1] | OUT_TRANSPOSE_EN | 0 | 1=输出时做NHWC→NCHW转置 |
-| [5:4] | BURST_LEN | 0 | Burst长度: 0=4, 1=8, 2=16, 3=32 (words) |
-| [7:6] | PRIORITY | 0 | DMA优先级: 0=低, 3=高 |
-| [8] | CIRCULAR_EN | 0 | 1=循环缓冲模式(ping-pong自动) |
-| [31:9] | — | 0 | 保留 |
-
-### 0x11C DMA_STATUS — DMA状态寄存器 [RO]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [0] | IN_BUSY | 输入DMA忙 |
-| [1] | OUT_BUSY | 输出DMA忙 |
-| [2] | WEIGHT_BUSY | 权重DMA忙 |
-| [15:8] | XFER_COUNT | 已完成的传输块数 |
-| [31:16] | — | 保留 |
-
-### 0x120 DMA_ADD_B_ADDR — Add节点第二输入地址 [RW]
-
-| Bit | 描述 |
-|-----|------|
-| [31:0] | Eltwise Add操作的第二输入（分支B）数据地址 |
-
-等价于 POST_ADD_INPUT_ADDR (0x198)，双映射。
-
-### 0x124 DMA_ADD_PARAM_ADDR — Add节点rescale参数地址 [RW]
-
-| Bit | 描述 |
-|-----|------|
-| [31:0] | Add节点的rescale参数 (M_A/S_A/M_B/S_B) 在外部SRAM的地址 |
-
-等价于 POST_ADD_PARAM_ADDR (0x194)，双映射。
-
-### 0x128 DMA_IN_SIZE — 输入数据总大小 [RW]
-
-| Bit | 描述 |
-|-----|------|
-| [31:0] | 输入数据总字节数 |
-
-### 0x12C DMA_WEIGHT_SIZE — 权重数据总大小 [RW]
-
-| Bit | 描述 |
-|-----|------|
-| [31:0] | 当前层权重总字节数 |
-
-### 0x130 DMA_OUT_SIZE — 输出数据总大小 [RW]
-
-| Bit | 描述 |
-|-----|------|
-| [31:0] | 当前层输出数据总字节数 |
-
-### 0x134 - 0x17F 保留
-
----
-
-## 6. Group 3：后处理配置 (0x180 - 0x1FF)
-
-Per-channel requantize 参数（M/S/bias/zp）存储在外部 SRAM 中，由 DMA 在每层计算前加载到片上 Parameter SRAM。此组寄存器配置加载地址、参数格式和后处理行为。
-
-### 0x180 POST_CTRL — 后处理控制寄存器 [RW]
-
-| Bit | 名称 | 复位值 | 描述 |
-|-----|------|--------|------|
-| [1:0] | PPU_MODE | 0 | 后处理模式: 0=CONV_REQ, 1=ADD, 2=RELU_ONLY, 3=PASS_THROUGH |
-| [2] | RELU_EN | 0 | 1=在requantize后启用ReLU (max(0,x)) |
-| [3] | RELU6_EN | 0 | 1=ReLU6模式 (clamp to [0, 6×scale]) |
-| [4] | LUT_EN | 0 | 1=启用LUT激活函数（替代ReLU） |
-| [5] | ZP_EN | 0 | 1=启用输出零点加法（INT8/INT16通用） |
-| [6] | BIAS_EN | 0 | 1=启用per-channel bias加法 |
-| [7] | INT16_OUT | 0 | 1=输出为INT16, 0=输出为INT8 |
-| [31:8] | — | 0 | 保留 |
-
-后处理管道执行顺序（固定，由硬件pipeline实现）：
-```
-acc(40-bit) → +bias_q[ch] → ×M[ch] → >>S[ch](+round) → +zp[ch] → clamp → ReLU/LUT → out
-```
-
-### 0x184 POST_PARAM_ADDR — Per-channel参数基地址 [RW]
-
-| Bit | 描述 |
-|-----|------|
-| [31:0] | Per-channel requantize参数在外部SRAM的字节地址（4字节对齐） |
-
-DMA 在计算启动前自动将参数加载到片上 Parameter SRAM。
-
-### 0x188 POST_PARAM_COUNT — 参数通道数 [RW]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [15:0] | PARAM_CH_COUNT | 需加载的输出通道数（= OUT_C） |
-| [31:16] | — | 保留 |
-
-DMA 加载字节数 = PARAM_CH_COUNT × 14 bytes。
-
-### 0x18C POST_CLAMP — Clamp范围 [RW]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [15:0] | CLAMP_MIN | 最小值 (INT16 signed: -32768~32767; INT8: -128~127) |
-| [31:16] | CLAMP_MAX | 最大值 (INT16: 32767; INT8: 127; ReLU: min=0) |
-
-### 0x190 POST_ACT_CFG — 激活函数配置 [RW]
-
-| Bit | 名称 | 复位值 | 描述 |
-|-----|------|--------|------|
-| [3:0] | ACT_TYPE | 0 | 激活类型: 0=None, 1=ReLU, 2=ReLU6, 3=LUT, 4-15=保留 |
-| [7:4] | LUT_INPUT_SHIFT | 0 | LUT输入预移位（将INT16缩放到LUT索引范围） |
-| [31:8] | — | 0 | 保留 |
-
-### 0x194 POST_ADD_PARAM_ADDR — Add节点参数地址 [RW]
-
-| Bit | 描述 |
-|-----|------|
-| [31:0] | Add节点rescale参数在外部SRAM的字节地址 |
-
-Add 参数格式（每节点 8 bytes）：
-```
-┌──────────────────────────────────────────────────────────────────┐
-│ byte[0:1] │ M_A[14:0] + reserved[15]                             │
-│ byte[2]   │ S_A[5:0] + reserved[7:6]                             │
-│ byte[3]   │ reserved                                             │
-│ byte[4:5] │ M_B[14:0] + reserved[15]                             │
-│ byte[6]   │ S_B[5:0] + reserved[7:6]                             │
-│ byte[7]   │ reserved                                             │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-### 0x198 POST_ADD_INPUT_ADDR — Add节点第二输入地址 [RW]
-
-| Bit | 描述 |
-|-----|------|
-| [31:0] | Add操作的第二输入（分支B）在外部SRAM的字节地址 |
-
-### 0x19C POST_ADD_STRIDE — Add节点第二输入步长 [RW]
-
-| Bit | 名称 | 描述 |
-|-----|------|------|
-| [15:0] | ADD_IN_STRIDE_ROW | 第二输入相邻行字节间距 |
-| [31:16] | — | 保留 |
-
-### 0x1A0 - 0x1FF 保留
-
----
-
-### Per-Channel 参数内存布局（软件规约）
-
-模型转换工具为每层生成 per-channel 参数数组，存放于外部 SRAM：
-
-```
-基地址: POST_PARAM_ADDR
-
-偏移 (per channel, 14 bytes each):
-┌─────────────────────────────────────────────────────────────────┐
-│  byte offset │ 内容                                              │
-├──────────────┼──────────────────────────────────────────────────┤
-│  [0:1]       │ M[14:0] (15-bit unsigned multiplier, bit15=0)    │
-│  [2]         │ S[5:0]  (6-bit shift amount, bit7:6=0)           │
-│  [3]         │ reserved (0x00)                                   │
-│  [4:5]       │ zp[15:0] (16-bit signed output zero point)       │
-│  [6:13]      │ bias_q[63:0] (64-bit signed, little-endian)      │
-└──────────────┴──────────────────────────────────────────────────┘
-
-总大小: OUT_C × 14 bytes
-示例: 512通道 = 7,168 bytes
-```
-
-硬件加载后存入 PPU Parameter SRAM，计算时按 ch_idx 索引查询。
-
----
-
-## 7. Group 4：LUT数据 (0x200 - 0x3FF)
-
-256-entry查找表，用于任意非线性激活函数。
-
-### INT8模式：64个寄存器存256个entries
-
-地址 0x200 - 0x2FC (64个寄存器)
-
-| 地址 | 内容 |
-|------|------|
-| 0x200 | LUT[0], LUT[1], LUT[2], LUT[3] (各8-bit, 从LSB开始) |
-| 0x204 | LUT[4], LUT[5], LUT[6], LUT[7] |
-| ... | ... |
-| 0x2FC | LUT[252], LUT[253], LUT[254], LUT[255] |
-
-使用方式：输入值x (INT8, 0-255范围转为无符号索引) → 输出 LUT[x]
-
-### INT16模式：128个寄存器存256个entries
-
-地址 0x200 - 0x3FC (128个寄存器)
-
-| 地址 | 内容 |
-|------|------|
-| 0x200 | LUT[0](低16bit), LUT[1](高16bit) |
-| 0x204 | LUT[2](低16bit), LUT[3](高16bit) |
-| ... | ... |
-| 0x3FC | LUT[254](低16bit), LUT[255](高16bit) |
-
----
-
-## 8. 寄存器地址汇总表
+| `[7:0]` | `MAC_LANES` | `64` | 稠密卷积/FC 一维行引擎并行 MAC 通道数 |
+| `[11:8]` | `NUM_ARRAYS` | `1` | 行引擎个数 |
+| `[15:12]` | `DW_CH_LOG2` | `3` | DW 每组并行通道数对数（`2^3 = 8` 通道） |
+| `[23:16]` | `SPAD_KB` | `172` | 片上四库 Scratchpad 总容量（单位：`1 KB`，`32+48+80+12 = 172`） |
+| `[24]` | `HAS_INT16` | `1` | `1` = 支持有符号 INT16 模式 |
+| `[25]` | `HAS_LUT` | `0` | `0` = LUT 非线性查表已裁撤 |
+| `[26]` | `HAS_IPU` | `0` | 图像前端扩展标志 |
+| `[31:27]` | — | `0` | 保留 |
+
+### `0x01C - 0x03C` 标识、层数与全局性能寄存器
 
 | 偏移 | 名称 | 类型 | 描述 |
 |------|------|------|------|
-| 0x000 | NPU_CTRL | RW | 启动/中止/复位控制 |
-| 0x004 | NPU_STATUS | RO | 运行状态 |
-| 0x008 | NPU_IRQ_EN | RW | 中断使能 |
-| 0x00C | NPU_IRQ_STATUS | W1C | 中断状态 |
-| 0x010 | NPU_ERROR_CODE | RO | 错误码 |
-| 0x014 | NPU_VERSION | RO | IP版本号 |
-| 0x018 | NPU_HW_CONFIG | RO | 硬件配置信息(阵列大小/数量/scratchpad) |
-| 0x01C | NPU_PERF_CNT | RO | 性能计数器(周期数) |
-| 0x020 | NPU_MAC_CNT | RO | MAC计数器 |
-| 0x024 | NPU_SERIAL_LO | RO | 序列号低32位(授权/追溯) |
-| 0x028 | NPU_SERIAL_HI | RO | 序列号高32位 |
-| 0x02C | NPU_VENDOR_ID | RO | 厂商ID + 产品ID |
-| 0x040 | LAYER_MODE | RW | 层类型与数据类型 |
-| 0x044 | IN_DIM_H_W | RW | 输入高度×宽度 |
-| 0x048 | IN_DIM_C | RW | 输入通道数 |
-| 0x04C | OUT_DIM_H_W | RW | 输出高度×宽度 |
-| 0x050 | OUT_DIM_C | RW | 输出通道数 |
-| 0x054 | KERNEL_SIZE | RW | 卷积核尺寸+膨胀系数 |
-| 0x058 | STRIDE | RW | 步长 |
-| 0x05C | PADDING | RW | 四边padding |
-| 0x060 | POOL_CFG | RW | 池化配置 |
-| 0x064 | RESIZE_CFG | RW | Resize配置 |
-| 0x068 | DECONV_CFG | RW | 转置卷积配置 |
-| 0x06C | CONCAT_CFG | RW | Concat配置 |
-| 0x070 | TILE_CFG | RW | 当前Tile尺寸 |
-| 0x074 | TILE_COUNT | RW | Tile数量 |
-| 0x078 | SRAM_BASE | RW | 片上SRAM输入/输出基地址 |
-| 0x100 | DMA_IN_ADDR | RW | 输入数据地址 |
-| 0x104 | DMA_OUT_ADDR | RW | 输出数据地址 |
-| 0x108 | DMA_WEIGHT_ADDR | RW | 权重地址 |
-| 0x10C | DMA_PARAM_ADDR | RW | Per-channel参数地址 (M/S/zp/bias) |
-| 0x110 | DMA_IN_STRIDE | RW | 输入步长(行/通道) |
-| 0x114 | DMA_OUT_STRIDE | RW | 输出步长 |
-| 0x118 | DMA_CTRL | RW | DMA控制(转置/burst/优先级) |
-| 0x11C | DMA_STATUS | RO | DMA状态 |
-| 0x120 | DMA_ADD_B_ADDR | RW | Add第二输入地址 |
-| 0x124 | DMA_ADD_PARAM_ADDR | RW | Add rescale参数地址 |
-| 0x128 | DMA_IN_SIZE | RW | 输入数据总大小 |
-| 0x12C | DMA_WEIGHT_SIZE | RW | 权重数据总大小 |
-| 0x130 | DMA_OUT_SIZE | RW | 输出数据总大小 |
-| 0x180 | POST_CTRL | RW | 后处理模式/使能控制 |
-| 0x184 | POST_PARAM_ADDR | RW | Per-channel参数基地址 |
-| 0x188 | POST_PARAM_COUNT | RW | 参数通道数 |
-| 0x18C | POST_CLAMP | RW | Clamp范围 (INT8/INT16) |
-| 0x190 | POST_ACT_CFG | RW | 激活函数配置 |
-| 0x194 | POST_ADD_PARAM_ADDR | RW | Add节点rescale参数地址 |
-| 0x198 | POST_ADD_INPUT_ADDR | RW | Add第二输入地址 |
-| 0x19C | POST_ADD_STRIDE | RW | Add第二输入步长 |
-| 0x200-0x3FF | LUT_DATA | RW | 256-entry激活函数查找表 |
+| `0x01C` | `NPU_PERF_CNT` | RO | 自上次 `START` 起累计的总时钟周期数 |
+| `0x020` | `NPU_MAC_CNT` | RO | 累计有效 MAC 操作计数 |
+| `0x024` | `NPU_SERIAL_LO` | RO | 序列号低 32 位（开源默认 `0x00000001`） |
+| `0x028` | `NPU_SERIAL_HI` | RO | 序列号高 32 位（开源默认 `0x00000000`） |
+| `0x02C` | `NPU_VENDOR_ID` | RO | `{Product=0x0001, Vendor=0x4F4E ("ON")}` |
+| `0x030` | `NPU_LAYER_COUNT` | RW | `AUTO_NEXT` 模式下的总层数 `[7:0]` |
+| `0x034` | `NPU_PERF_DMA_CNT` | RO | DMA 活跃周期计数 |
+| `0x038` | `NPU_PERF_COMPUTE_CNT` | RO | 计算核活跃周期计数 |
+| `0x03C` | `NPU_PERF_OVERLAP_CNT` | RO | DMA 与计算核并行重叠周期计数 |
 
 ---
 
-## 9. 典型使用流程
+## 4. Group 1：层参数配置 (`0x040 - 0x0FF`)
 
-### 9.1 CPU配置一层Conv2D + ReLU的示例 (INT16 per-channel)
+### `0x040 LAYER_MODE` — 算子类型、精度与输入零点 `[RW]`
 
-```c
-// 假设模型转换工具已生成:
-//   - 权重数据 @ 0x08000000 (INT16, NHWC layout)
-//   - per-channel参数 @ 0x08020000 (M/S/zp/bias, 8 bytes/ch)
-//   - 输入激活 @ 0x20000000 (INT16, 前一层输出)
-//   - 输出目标 @ 0x20010000
+| Bit | 名称 | 描述 |
+|-----|------|------|
+| `[3:0]` | `OP_TYPE` | `0`=CONV2D, `1`=DW_CONV, `2`=FC, `3`=POOLING, `4`=ELTWISE_ADD, `5`=RESIZE, `7`=CONCAT（`6` 已停用） |
+| `[4]` | `DATA_TYPE` | `0` = INT8，`1` = INT16 |
+| `[5]` | `PINGPONG_SEL` | 激活双缓冲初始 bank 选择 |
+| `[15:8]` | `IN_ZP` | 有符号 8-bit 输入零点（用于边界 padding 填充） |
+| `[31:16]` | — | 保留 |
 
-// 1. 配置层参数
-REG(LAYER_MODE)    = (1 << 4) | 0x00;  // DATA_TYPE=INT16, OP_TYPE=CONV2D
-REG(IN_DIM_H_W)   = (56 << 16) | 56;  // 56×56输入
-REG(IN_DIM_C)     = 64;               // 64通道输入
-REG(OUT_DIM_H_W)  = (56 << 16) | 56;  // 56×56输出
-REG(OUT_DIM_C)    = 128;              // 128通道输出
-REG(KERNEL_SIZE)  = (1 << 24) | (1 << 16) | (3 << 8) | 3; // 3×3, dilation=1
-REG(STRIDE)       = (1 << 8) | 1;     // stride=1
-REG(PADDING)      = (1 << 24) | (1 << 16) | (1 << 8) | 1; // pad=1 all sides
+### `0x044 - 0x078` 几何尺寸、卷积参数与切块配置 `[RW]`
 
-// 2. 配置DMA地址
-REG(DMA_IN_ADDR)      = 0x20000000;   // 输入激活地址
-REG(DMA_OUT_ADDR)     = 0x20010000;   // 输出目标地址
-REG(DMA_WEIGHT_ADDR)  = 0x08000000;   // 权重地址
-REG(DMA_PARAM_ADDR)   = 0x08020000;   // per-channel参数地址 (M/S/zp/bias)
-REG(DMA_IN_STRIDE)    = (56 * 64 * 2); // row stride = W × C_in × 2B
-REG(DMA_CTRL)         = 0x00;         // 无转置, burst=4
-
-// 3. 配置后处理 (per-channel requantize + ReLU)
-REG(POST_CTRL)        = (1 << 6)      // BIAS_EN = 1
-                      | (0 << 5)      // ZP_EN = 0 (symmetric, zp=0)
-                      | (1 << 2)      // RELU_EN = 1
-                      | (1 << 7)      // INT16_OUT = 1
-                      | 0x00;         // PPU_MODE = CONV_REQ
-REG(POST_PARAM_ADDR)  = 0x08020000;   // 同 DMA_PARAM_ADDR
-REG(POST_PARAM_COUNT) = 128;          // 128通道参数 = 128×10 = 1280 bytes
-REG(POST_CLAMP)       = (32767 << 16) | (uint16_t)(-32768); // INT16 full range
-REG(POST_ACT_CFG)     = 1;            // ACT_TYPE = ReLU
-
-// 4. 启动
-REG(NPU_CTRL) = 0x01;  // START
-
-// 5. 等待完成
-while (!(REG(NPU_IRQ_STATUS) & 0x01));  // 等DONE_IRQ
-REG(NPU_IRQ_STATUS) = 0x01;            // 写1清中断
-```
-
-### 9.2 Eltwise Add (残差连接) 示例
-
-```c
-// Add: out = rescale_A(branch_A) + rescale_B(branch_B)
-// 两路输入scale不同, 需各自rescale到输出scale
-
-// 层参数 (Add是element-wise, 输入输出尺寸相同)
-REG(LAYER_MODE)    = (1 << 4) | 0x04;  // INT16, OP_TYPE=ELTWISE_ADD
-REG(IN_DIM_H_W)   = (14 << 16) | 14;
-REG(IN_DIM_C)     = 256;
-REG(OUT_DIM_H_W)  = (14 << 16) | 14;
-REG(OUT_DIM_C)    = 256;
-
-// DMA: 分支A的输入地址 (主输入)
-REG(DMA_IN_ADDR)      = 0x20000000;   // branch A 数据
-REG(DMA_OUT_ADDR)     = 0x20008000;   // 输出目标
-
-// Add 专用配置
-REG(POST_ADD_INPUT_ADDR) = 0x20004000;   // branch B 数据地址
-REG(POST_ADD_PARAM_ADDR) = 0x08030000;   // Add rescale参数 (M_A/S_A/M_B/S_B)
-REG(POST_ADD_STRIDE)     = 14 * 256 * 2; // branch B row stride
-
-// 后处理: Add mode + ReLU
-REG(POST_CTRL)  = (1 << 2)   // RELU_EN
-                | (1 << 7)   // INT16_OUT
-                | 0x01;      // PPU_MODE = ADD
-REG(POST_CLAMP) = (32767 << 16) | (uint16_t)(-32768);
-REG(POST_ACT_CFG) = 1;      // ReLU
-
-// 启动
-REG(NPU_CTRL) = 0x01;
-while (!(REG(NPU_IRQ_STATUS) & 0x01));
-REG(NPU_IRQ_STATUS) = 0x01;
-```
-
-### 9.3 INT8 模式 Conv2D (per-channel scale+zp)
-
-```c
-// INT8 模式: 非对称量化, 每通道有独立 zp
-REG(LAYER_MODE)    = 0x00;            // DATA_TYPE=INT8, OP_TYPE=CONV2D
-REG(OUT_DIM_C)    = 128;
-
-// 后处理: per-channel requantize with zero-point
-REG(POST_CTRL)    = (1 << 6)          // BIAS_EN
-                  | (1 << 5)          // ZP_EN = 1 (INT8 needs zp)
-                  | (1 << 2)          // RELU_EN
-                  | (0 << 7)          // INT16_OUT = 0 (INT8 output)
-                  | 0x00;             // CONV_REQ mode
-REG(POST_PARAM_ADDR)  = 0x08040000;  // INT8 per-channel参数
-REG(POST_PARAM_COUNT) = 128;
-REG(POST_CLAMP) = (127 << 16) | (uint16_t)(-128); // INT8 range
-
-// ... 其余同 9.1
-REG(NPU_CTRL) = 0x01;
-```
-
-### 9.4 Sigmoid激活（通过LUT）
-
-```c
-// 预计算sigmoid LUT: 256 entries, INT16 mode
-// LUT[i] = quantize(sigmoid(dequantize(i)))
-for (int i = 0; i < 128; i++) {
-    uint32_t packed = (uint16_t)lut_values[i*2]
-                    | ((uint32_t)(uint16_t)lut_values[i*2+1] << 16);
-    REG(0x200 + i*4) = packed;
-}
-
-// 后处理: requantize → LUT (替代ReLU)
-REG(POST_CTRL)    = (1 << 6)  // BIAS_EN
-                  | (1 << 4)  // LUT_EN
-                  | (1 << 7)  // INT16_OUT
-                  | 0x00;     // CONV_REQ
-REG(POST_ACT_CFG) = (4 << 4) // LUT_INPUT_SHIFT=4 (INT16→8-bit index)
-                   | 3;       // ACT_TYPE = LUT
-```
+| 偏移 | 名称 | 位域定义 |
+|------|------|----------|
+| `0x044` | `IN_DIM_H_W` | `[15:0]` `IN_H`，`[31:16]` `IN_W` |
+| `0x048` | `IN_DIM_C` | `[15:0]` `IN_C` |
+| `0x04C` | `OUT_DIM_H_W` | `[15:0]` `OUT_H`，`[31:16]` `OUT_W` |
+| `0x050` | `OUT_DIM_C` | `[15:0]` `OUT_C` |
+| `0x054` | `KERNEL_SIZE` | `[7:0]` `KH`，`[15:8]` `KW`，`[23:16]` `DILATION_H`，`[31:24]` `DILATION_W` |
+| `0x058` | `STRIDE` | `[7:0]` `STRIDE_H`，`[15:8]` `STRIDE_W` |
+| `0x05C` | `PADDING` | `[7:0]` `PAD_TOP`，`[15:8]` `PAD_BOTTOM`，`[23:16]` `PAD_LEFT`，`[31:24]` `PAD_RIGHT` |
+| `0x060` | `POOL_CFG` | `[0]` `0=Max/1=Avg`，`[7:4]` `POOL_H`，`[11:8]` `POOL_W`，`[15:12]` `STRIDE_H`，`[19:16]` `STRIDE_W`，`[20]` `GLOBAL_POOL` |
+| `0x064` | `RESIZE_CFG` | `[0]` `0=Nearest/1=Bilinear`，`[15:8]` `SCALE_H` (Q4.4)，`[23:16]` `SCALE_W` (Q4.4) |
+| `0x068` | — | 保留（历史 `DECONV_CFG` 已裁撤） |
+| `0x06C` | `CONCAT_CFG` | `[15:0]` `CONCAT_OFFSET`，`[31:16]` `CONCAT_TOTAL_C` |
+| `0x070` | `TILE_CFG` | `[15:0]` `TILE_H`（`0` = 不切块），`[31:16]` `TILE_W` |
+| `0x074` | `TILE_COUNT` | `[15:0]` `TILE_NUM_H`，`[31:16]` `TILE_NUM_W` |
+| `0x078` | `SRAM_BASE` | `[12:0]` `ACT_BASE`（IFM 字偏移），`[28:16]` `OUT_BASE`（OFM 字偏移） |
 
 ---
 
-## 10. 设计备注
+## 5. Group 2：DMA、权重布局、参数预取与 Super-Block (`0x100 - 0x17F`)
 
-1. **Per-channel参数加载流程**：CPU配置 POST_PARAM_ADDR 和 POST_PARAM_COUNT 后，NPU 在 START 后自动通过 DMA 将参数加载到片上 Parameter SRAM。参数 SRAM 大小固定为 8KB（支持最多 512 通道 × 14 bytes = 7KB，余量用于对齐），大于 512 通道时需分 tile 处理（Control Unit 自动管理）。
+| 偏移 | 名称 | 类型 | 描述 |
+|------|------|------|------|
+| `0x100` | `DMA_IN_ADDR` | RW | 输入激活主存字节基址 |
+| `0x104` | `DMA_OUT_ADDR` | RW | 输出激活主存字节基址 |
+| `0x108` | `DMA_WEIGHT_ADDR` | RW | 权重数据主存字节基址 |
+| `0x10C` | `DMA_PARAM_ADDR` | RW | 逐通道参数主存字节基址（与 `0x184` 双映射） |
+| `0x110` | `DMA_IN_STRIDE` | RW | `[15:0]` 输入行字节跨度 |
+| `0x114` | `DMA_OUT_STRIDE` | RW | `[15:0]` 输出行字节跨度 |
+| `0x118` | `DMA_CTRL` | RW | 调度与双缓冲/融合控制位（`DB_EN`、`FUSE_*` 等） |
+| `0x11C` | `DMA_STATUS` | RO | `[2:0]` DMA 忙状态标志 |
+| `0x120` | `DMA_ADD_B_ADDR` | RW | Add 第二输入分支主存地址（与 `0x198` 双映射） |
+| `0x124` | `DMA_ADD_PARAM_ADDR` | RW | Add 双路缩放参数主存地址（与 `0x194` 双映射） |
+| `0x128` | `DMA_IN_SIZE` | RW | 输入激活总字节数 |
+| `0x12C` | `DMA_WEIGHT_SIZE` | RW | 当前层（或单组）权重字节数 |
+| `0x130` | `DMA_OUT_SIZE` | RW | 输出激活总字节数 |
+| `0x134` | `DMA_TILE_IN_SIZE` | RW | 单空间 tile 输入字节数（`DB_EN` 切块使用） |
+| `0x138` | `DMA_TILE_OUT_SIZE` | RW | 单空间 tile 输出字节数 |
+| `0x13C` | `TILE_IN_HW` | RW | `[31:16]` `TILE_IN_H`，`[15:0]` `TILE_IN_W` |
+| `0x140` | `DMA_STORE_MODE` | RW | `[0]` `PER_TILE_STORE_EN`（切块按 2D 行距写回主存大图） |
+| `0x144` | `DMA_ROW_CFG` | RW | `[31:16]` `ROW_COUNT`，`[15:0]` `ROW_LEN`（2D DMA 配置） |
+| `0x148` | `DMA_WGT_PER_OC` | RW | 每个 `oc_group` 对应的权重 32-bit 字数（`0` = 全层常驻不重载） |
+| `0x14C` | `WGT_LAYOUT` | RW | `[0]` `1` = K-major 64-lane 打包布局（现行标准）；`0` = 旧版兼容 |
+| `0x150` | `NEXT_PARAM_ADDR` | RW | 下一层逐通道参数预取主存地址 |
+| `0x154` | `NEXT_PARAM_CFG` | RW | `[31]` 预取使能，`[15:0]` 预取 32-bit 字数 |
+| `0x158` | `PARAM_BANK_CTRL` | RW | 参数 SRAM 前后半区（ping/pong）读取与预取目标选择 |
+| `0x15C` | `PARAM_BANK_STATUS` | RO | `[31:16]` 半库深度（words），`[0]` `NEXT_PARAM_READY` |
+| `0x160` | `SUPER_CTRL` | RW | `[0]` Super-Block 请求，`[2:1]` 启动槽位，`[9:8]` 窗口映射槽位（`0..2`） |
+| `0x164` | `SUPER_STATUS` | RO | `[3:2]` 当前激活槽位，`[1]` 冻结标志，`[0]` 硬件多槽状态机使能标志 |
 
-2. **参数 SRAM 生命周期**：每层计算前加载，计算完成后内容失效。下一层开始时重新加载新参数。由于参数量小（128ch = 1.25KB），加载时间远小于计算时间，不影响性能。
+---
 
-3. **Bias 合并到参数包**：传统设计中 bias 独立存储，本设计将 bias_q 合并到 per-channel 参数包中（14 bytes/ch 内含 64-bit bias + 16-bit zp），减少一次 DMA 事务，简化控制逻辑。使用 int64 bias 是因为 INT8 量化大通道卷积的 bias 累加精度需要。
+## 6. Group 3：后处理配置与计算周期直方图 (`0x180 - 0x1FF`)
 
-4. **Add 节点参数**：Add rescale 参数很少（每个 Add 节点 8 bytes），对于整个模型（12 个 Add 节点 = 96 bytes），可一次性加载或跟随对应层的参数一起加载。
+### `0x180 - 0x19C` 后处理配置 `[RW]`
 
-5. **Tiling由离线编译器计算**：编译器（`tools/tiling.py`）根据SRAM预算计算最优tile尺寸，结果写入layer descriptor的tile_h/tile_w/tile_num_h/tile_num_w字段。Control Unit按descriptor指定的tile参数执行循环，不自行推导tile尺寸。CPU每层配置一次完整参数，ping-pong切换由Control Unit管理。
+| 偏移 | 名称 | 位域定义 |
+|------|------|----------|
+| `0x180` | `POST_CTRL` | `[1:0]` `PPU_MODE` (`0`=CONV_REQ, `1`=ADD, `2`=RELU_ONLY, `3`=PASSTHROUGH)，`[2]` `RELU_EN`，`[3]` `RELU6_EN`，`[5]` `ZP_EN`，`[6]` `BIAS_EN`，`[7]` `INT16_OUT`（`[4]` 保留） |
+| `0x184` | `POST_PARAM_ADDR` | 同 `0x10C DMA_PARAM_ADDR` |
+| `0x188` | `POST_PARAM_COUNT` | `[15:0]` 输出通道参数个数（每通道 14 字节：`M[14:0]`, `S[5:0]`, `zp[15:0]`, `bias_q[63:0]`） |
+| `0x18C` | `POST_CLAMP` | `[15:0]` `CLAMP_MIN`（有符号 16-bit），`[31:16]` `CLAMP_MAX`（有符号 16-bit） |
+| `0x190` | `POST_ACT_CFG` | `[3:0]` 激活函数辅助编码（`0`=None，`1`=ReLU，`2`=ReLU6） |
+| `0x194` | `POST_ADD_PARAM_ADDR` | 同 `0x124 DMA_ADD_PARAM_ADDR`（8 字节：`M_A, S_A, M_B, S_B`） |
+| `0x198` | `POST_ADD_INPUT_ADDR` | 同 `0x120 DMA_ADD_B_ADDR` |
+| `0x19C` | `POST_ADD_STRIDE` | `[15:0]` Add 分支 B 行字节跨度 |
 
-6. **AUTO_NEXT模式**：如果配置了层描述符链表（存在外部SRAM），NPU可以自动加载下一层配置，无需CPU每层干预。V1.0可先不实现，每层手动配置。
+PPU 4 级流水执行顺序（44-bit 累加器输入）：
+```
+acc(44-bit) -> + bias_q[ch] -> * M[ch] + (1 << (S[ch]-1)) -> >>> S[ch] -> + zp[ch] -> clamp -> ReLU/ReLU6 -> out
+```
 
-7. **性能计数器**：NPU_PERF_CNT和NPU_MAC_CNT用于性能分析和利用率计算：
-   - 利用率 = MAC_COUNT / (CYCLE_COUNT × ARRAY_SIZE²)
+### `0x1A0 - 0x1D0` 计算微状态机周期直方图 `[RO]`
 
-8. **LUT填充时机**：LUT数据在NPU空闲时写入，不能在计算过程中修改。如果相邻层激活函数不同，需在层间切换时更新LUT。
+| 偏移 | 名称 | 统计含义 |
+|------|------|----------|
+| `0x1A0` | `PERF_ST_MAC` | Row / DW 乘加发射状态周期数 |
+| `0x1A4` | `PERF_ST_WAIT` | 等待激活 gather / 权重 / 双缓冲握手总周期数 |
+| `0x1A8` | `PERF_ST_WB` | 8-lane PPU 排空与 OFM 写回周期数 |
+| `0x1AC` | `PERF_ST_POOL` | Pooling 通路周期数 |
+| `0x1B0` | `PERF_ST_ADD` | Elementwise Add 通路周期数 |
+| `0x1B4` | `PERF_ST_RSZ` | Resize 通路周期数 |
+| `0x1B8` | `PERF_ST_CFG` | 层/块初始化与边界设置周期数 |
+| `0x1BC` | `PERF_ST_OTH` | 其余控制过渡周期数 |
+| `0x1C0` | `PERF_WAIT_ACT` | 等待激活数据就绪细分周期数 |
+| `0x1C4` | `PERF_WAIT_WGT` | 等待权重加载细分周期数 |
+| `0x1C8` | `PERF_WAIT_DB` | 等待双缓冲 `db_prefetch_done` 细分周期数 |
+| `0x1CC` | `PERF_MAC_IDLE` | 处于 MAC 状态但未发射有效乘加的空拍数 |
+| `0x1D0` | `PERF_WAIT_STORE` | 等待主存写回完成周期数 |
 
-9. **双映射寄存器**：DMA_PARAM_ADDR 与 POST_PARAM_ADDR、DMA_ADD_B_ADDR 与 POST_ADD_INPUT_ADDR 等为同一物理寄存器的双地址映射，方便驱动在配置 DMA 组或后处理组时就近访问。
+---
+
+## 7. Group 5：Super-Block 描述符窗口 (`0x400 - 0x4AF`)
+
+当 `SUPER_CTRL[9:8]` 选择槽位 `s`（`0 <= s <= 2`）且未处于运行冻结态时，向 `0x400 + 4*w`（`0 <= w < 44`）读写即访问第 `s` 槽的第 `w` 个层描述符寄存器镜像。写入 `NPU_CTRL.START` 的同一总线周期若 `SUPER_CTRL[0] == 1`，硬件原子冻结当前启动槽位，防止运行期描述符被意外改写。
+
+---
+
+## 8. 典型单层编程示例（K-Major Conv2D + ReLU）
+
+```c
+// 1. 层几何与精度: INT8 Conv2D 3x3, 56x56x64 -> 56x56x128, pad=1, stride=1
+REG(0x040) = 0x00;                              // OP_CONV2D, INT8, in_zp=0
+REG(0x044) = (56u << 16) | 56u;
+REG(0x048) = 64u;
+REG(0x04C) = (56u << 16) | 56u;
+REG(0x050) = 128u;
+REG(0x054) = (1u << 24) | (1u << 16) | (3u << 8) | 3u;
+REG(0x058) = (1u << 8) | 1u;
+REG(0x05C) = 0x01010101u;
+REG(0x070) = 0u;                                // 不切块
+
+// 2. DMA 与 K-major 权重布局
+REG(0x100) = act_in_addr;
+REG(0x104) = act_out_addr;
+REG(0x108) = wgt_kmajor_addr;
+REG(0x10C) = param_addr;
+REG(0x128) = 56u * 56u * 64u;
+REG(0x12C) = 128u * 3u * 3u * 64u;
+REG(0x130) = 56u * 56u * 128u;
+REG(0x14C) = 1u;                                // WGT_LAYOUT = K-major
+
+// 3. PPU 后处理: INT64 bias + per-channel requant + ReLU
+REG(0x180) = (1u << 6) | (1u << 2) | 0x00u;     // BIAS_EN | RELU_EN | CONV_REQ
+REG(0x188) = 128u;
+REG(0x18C) = (127u << 16) | (uint16_t)(-128);
+REG(0x190) = 1u;
+
+// 4. 清中断、启动并等待完成
+REG(0x00C) = 0x07u;
+REG(0x000) = 0x01u;                             // CTRL_START
+while (!(REG(0x00C) & 0x01u)) {}
+REG(0x00C) = 0x07u;
+```

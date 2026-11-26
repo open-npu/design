@@ -2,81 +2,59 @@
 
 [English](README.md)
 
-Open-NPU 神经网络加速器的硬件架构与接口规格文档。
+Open-NPU 神经网络加速器的硬件架构、数据通路、二进制格式与寄存器规格文档。
 
 ## 文档列表
 
 | 文档 | 说明 |
 |------|------|
-| [open_npu_overview.md](open_npu_overview.md) | 整机地图 — ONNX → CSIM → SoC RTL、切块、十格验收 |
-| [architecture-spec.md](architecture-spec.md) | 完整架构规格 — 数据通路、存储层次、各模块微架构 |
-| [interface-spec.md](interface-spec.md) | 端口级接口时序与协议定义 |
-| [npu-register-spec.md](npu-register-spec.md) | CSR 寄存器映射、位域、访问类型 |
+| [open_npu_overview.md](open_npu_overview.md) | 整机地图 — ONNX -> CSIM -> SoC RTL 全链路、切块、融合与公开基准模型矩阵（`model_c`、`model_e`） |
+| [rtl_design_overview.md](rtl_design_overview.md) | 信号级 RTL 实现总览（`npu_top`、64-lane Row、8-lane PPU、四库 512-bit SRAM） |
+| [mac_array_and_datapath.md](mac_array_and_datapath.md) | 64-lane K-major 行引擎、`wrow/abuf/avec` 单写口分库、DW 折叠复用与激活喂入数据通路 |
+| [architecture-spec.md](architecture-spec.md) | 系统架构设计规格 — 架构权衡、定点位宽推导、空间切块与双缓冲设计 |
+| [interface-spec.md](interface-spec.md) | 离线 `NPU1` 模型二进制与层描述符权威定义 |
+| [npu-register-spec.md](npu-register-spec.md) | 完整 CSR 寄存器手册（`0x000-0x4FF`）、位域定义、性能直方图寄存器与编程示例 |
+| [QUICK_START.md](QUICK_START.md) | 从 ONNX 量化转换到 CSIM、RTL cocotb 与 SoC 仿真的端到端快速上手指南 |
 
-## 核心指标
+## 核心硬件指标
 
-- 64-lane 一维 MAC 行引擎（64 MACs/cycle）+ 8-ch DW 流式单元
-- INT8 / INT16 混合精度支持，44-bit 有符号累加器
-- Per-channel 重量化，INT64 bias 累加
-- 172KB 独立四库 Scratchpad（32KB IFM + 48KB OFM + 80KB WGT + 12KB PARAM，512-bit 宽读口）
-- Wishbone-B4 32-bit 总线接口（4 B/cycle，机器平衡比 16 MACs/Byte）
-- 峰值算力：12.8 GMAC/s（25.6 GOPS / 0.0256 TOPS）@ 200MHz
+- **计算核心**：统一 64-lane K-major MAC 行引擎（`64 MACs/cycle`），统一承载 Conv2D、FC 与 Depthwise Conv2D（DW 复用 `wrow` 与 `racc`）
+- **后处理通路**：8-lane 分时复用 PPU（`PPU_LANES=8`，4 级流水，INT64 bias + 逐通道乘移截断）+ 8-lane 流水双分支 Elementwise Add
+- **数据精度**：有符号 INT8 / INT16 激活与权重，44-bit 有符号累加器
+- **片上存储**：172 KB 独立四库 Scratchpad（`32 KB IFM + 48 KB OFM + 80 KB WGT + 12 KB PARAM`，计算侧 512-bit 宽口，DMA 侧 32-bit 端口）
+- **总线接口**：Wishbone-B4 32-bit CSR 从接口 + Wishbone-B4 32-bit 流水 DMA 主接口
+- **峰值算力**：`12.8 GMAC/s`（`25.6 GOPS`）@ `200 MHz`
 
-## 支持的算子（RTL 已验证）
+## 支持的算子（RTL 逐比特验证通过）
 
-全部 8 种 CNN 算子类型均已在可综合 Verilog 中实现，并通过 C 仿真器 golden 数据逐比特验证。
+| `op_type` | 算子 | 硬件路径 | RTL 状态 |
+|-----------|------|----------|----------|
+| 0 | Conv2D | 64-lane K-major 行引擎（支持任意卷积核、步长、空洞率与填充） | 已验证 |
+| 1 | DWConv | 折叠复用 `wrow_b[0..31]` + `racc[0..7]`（8 通道/组，支持全局 DW 切片流式） | 已验证 |
+| 2 | FC | 64-lane K-major 行引擎（复用 1x1 卷积路径） | 已验证 |
+| 3 | Pooling | 流式池化状态机（Max / Avg / Global，内置 40 拍串行恢复余数倒数器） | 已验证 |
+| 4 | Eltwise Add | 8-lane 流水双路重缩放加法 + PPU 钳位 | 已验证 |
+| 5 | Resize | 流式缩放状态机（最近邻 / 双线性） | 已验证 |
+| 6 | Reserved | 已裁撤保留（`OP_DECONV` 已停用，硬件守卫拦截） | — |
+| 7 | Concat | 通道偏移寻址拼接 + 可选重缩放 | 已验证 |
 
-| op_type | 算子 | 硬件路径 | RTL 状态 |
-|---------|------|----------|----------|
-| 0 | Conv2D | 脉动阵列 (1×1, 3×3) | 已验证 |
-| 1 | DWConv | DW Conv 模块 (任意 kernel) | 已验证 |
-| 2 | FC | 脉动阵列 (复用 Conv2D) | 已验证 |
-| 3 | Pooling | Pooling FSM (Max / Avg / Global) | 已验证 |
-| 4 | Eltwise Add | Add FSM + 双路 rescale | 已验证 |
-| 5 | Resize | Resize FSM (最近邻 / 双线性) | 已验证 |
-| 6 | Deconv | Conv2D 路径 + 零插入跳过逻辑 | 已验证 |
-| 7 | Concat | 复用 Add FSM + 偏移寻址 | 已验证 |
+## RTL 验证与零黑盒综合基线
 
-## RTL 验证状态
-
-| 测试集 | 范围 | 结果 |
-|--------|------|------|
-| 单元测试 (PE, Systolic, PPU, CSR, SRAM, DMA, DW, Ctrl, Top, Compute) | 90+ 测试 | 全部通过 |
-| DMA E2E INT8 10层 synth_dw | 逐层 bit-exact | 通过 |
-| DMA E2E INT16 10层 synth_dw | 逐层 bit-exact | 通过 |
-| Spatial Tiling E2E (32×32 输入, 6 层) | 所有 tiling 变体 | 通过 |
-| 独立算子 E2E (Pooling, Add, Resize, Deconv, Concat) | 15+ 测试 | 全部通过 |
-| **AllOps-Mini 全模型** (18 层, 7 种算子, 16×16 输入) | **端到端 bit-exact** | **通过** |
-| **AllOps-128 全模型** (18 层, 22 次调用, 128×128 输入) | **E2E bit-exact + DMA tiling** | **通过** |
-| **INT16 全链路回归** (10 项测试, 全部 7 种算子 + AllOps-Mini INT16) | **10/10 bit-exact** | **通过** |
-| **Auto-Next 多层自动推理** (3 层自动推理, 单次 START) | **FSM 自动重启 bit-exact** | **通过** |
-
-## 综合结果 (Yosys `synth_xilinx`)
-
-Yosys 0.65 Xilinx 7-series 综合 (`synth_xilinx -top npu_top -family xc7`, ARRAY_SIZE=16, SPAD_KB=128)：
-
-| 资源 | 数量 |
-|------|------|
-| LUT (总计) | 52,804 |
-| FF (触发器) | 39,145 |
-| BRAM36E1 | 26 (104KB SRAM) |
-| DSP48E1 | 333 |
-| CARRY4 | 8,022 |
-| 估计 Logic Cells | 43,726 |
-
-推荐 FPGA 目标器件：
-
-| 器件 | LUT 利用率 | 适配 |
-|------|------------|------|
-| XC7A200T (Artix-7) | 39% | **性价比首选** |
-| XC7K160T (Kintex-7) | 52% | 高主频选择 |
-| XC7Z045 (Zynq) | 24% | 带 ARM SoC |
+| 测试集 / 指标 | 范围 | 结果 |
+|---------------|------|------|
+| 单元 cocotb 测试 | CSR、SRAM、PPU、DMA、Ctrl、Compute | `50/50 通过` |
+| 集成 cocotb 测试 | Top、Super-block CSR、Param 预取、Tiling、利用率 | `61/61 通过` |
+| 鲁棒性与 E2E cocotb 测试 | WB 协议、Abort/Reset、边界异常、DMA E2E（`model_c/e` 及合成算子链） | `45/45 通过` |
+| SoC Verilator 整网链式 E2E | 公开代号模型（`model_c`、`model_e` 的 INT8 与 INT16） | 逐层逐 word bit-exact 通过 |
+| Yosys 全芯片真综合（`synth -top npu_top`，0 黑盒） | 全部可综合 RTL 模块（`172 KB` SRAM + `102,400`-bit 内部 bank 全部推断为 `$mem_v2`） | **`40,963` cells**（`npu_compute`: `29,010`，`$adff`: `886`，`$mul`: `488`，`$div`: `0`，`$mod`: `0`） |
 
 ## 相关仓库
 
-- [open-npu/rtl](https://github.com/open-npu/rtl) — 可综合 Verilog 实现
-- [open-npu/csim](https://github.com/open-npu/csim) — C 周期近似模拟器
-- [open-npu/tools](https://github.com/open-npu/tools) — ONNX 转换器与量化工具链
+- [open-npu/rtl](https://github.com/open-npu/rtl) — 可综合 Verilog-2005 实现与 cocotb 验证套件
+- [open-npu/soc](https://github.com/open-npu/soc) — LiteX + VexRiscv SoC 集成与 Verilator 整机仿真
+- [open-npu/csim](https://github.com/open-npu/csim) — 逐比特一致 C 参考仿真器
+- [open-npu/tools](https://github.com/open-npu/tools) — ONNX 转换、INT8/INT16 量化、K-major 打包与切块工具链
+- [open-npu/driver](https://github.com/open-npu/driver) — Bare-metal 与 FreeRTOS C 驱动 SDK
 
 ## 许可证
 

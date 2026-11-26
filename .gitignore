@@ -2,3 +2,8 @@
 *.swo
 *~
 .DS_Store
+*.html
+*.txt
+DEBUG_*.md
+*_REPORT.md
+*_review_*.md
