@@ -138,4 +138,4 @@ Depthwise 卷积每个通道独立在 `kernel_h * kernel_w` 窗口上乘加，�
 - `0x034 / 0x038 / 0x03C`：DMA 周期 / Compute 周期 / DMA-Compute 重叠周期
 - `0x1A0-0x1D0`：计算微状态机在 `MAC 发射 / 等待激活 / 等待权重 / 等待双缓冲 / PPU 写回 / Pool / Add / Resize` 各阶段的精确拍数统计
 
-计算阶段实测口径见 `rtl/tb/integration/test_array_util.py` 与 `rtl/tb/run_util_sweep.sh`（默认扫描公开基准模型 `a / c / e`）。
+计算阶段阵列利用率实测入口见 `rtl/tb/integration/test_array_util.py`（公开基准模型 `model_c / model_e / model_s`）。

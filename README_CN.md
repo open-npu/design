@@ -11,7 +11,6 @@ Open-NPU 神经网络加速器的硬件架构、数据通路、二进制格式�
 | [open_npu_overview.md](open_npu_overview.md) | 整机地图 — ONNX -> CSIM -> SoC RTL 全链路、切块、融合与公开基准模型矩阵（`model_c`、`model_e`、`model_s`） |
 | [rtl_design_overview.md](rtl_design_overview.md) | 信号级 RTL 实现总览（`npu_top`、64-lane Row、8-lane PPU、四库 512-bit SRAM） |
 | [mac_array_and_datapath.md](mac_array_and_datapath.md) | 64-lane K-major 行引擎、`wrow/abuf/avec` 单写口分库、DW 折叠复用与激活喂入数据通路 |
-| [architecture-spec.md](architecture-spec.md) | 系统架构设计规格 — 架构权衡、定点位宽推导、空间切块与双缓冲设计 |
 | [interface-spec.md](interface-spec.md) | 离线 `NPU1` 模型二进制与层描述符权威定义 |
 | [npu-register-spec.md](npu-register-spec.md) | 完整 CSR 寄存器手册（`0x000-0x4FF`）、位域定义、性能直方图寄存器与编程示例 |
 | [QUICK_START.md](QUICK_START.md) | 从 ONNX 量化转换到 CSIM、RTL cocotb 与 SoC 仿真的端到端快速上手指南 |

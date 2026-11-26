@@ -11,7 +11,6 @@ Hardware architecture, datapath, binary format, and CSR specifications for the O
 | [open_npu_overview.md](open_npu_overview.md) | Whole-chip map — ONNX -> CSIM -> SoC RTL, tiling, fusion, and public model matrix (`model_c`, `model_e`, `model_s`) |
 | [rtl_design_overview.md](rtl_design_overview.md) | Signal-level RTL implementation guide (`npu_top`, 64-lane Row, 8-lane PPU, 4-bank 512-bit SRAM) |
 | [mac_array_and_datapath.md](mac_array_and_datapath.md) | 64-lane K-major Row Engine, `wrow/abuf/avec` banking, DW folding, and activation feed datapath |
-| [architecture-spec.md](architecture-spec.md) | System architecture specification — design rationale, precision analysis, tiling, and double buffering |
 | [interface-spec.md](interface-spec.md) | Offline `NPU1` binary format and descriptor layout specification |
 | [npu-register-spec.md](npu-register-spec.md) | Complete CSR register map (`0x000-0x4FF`), bit fields, performance counters, and programming examples |
 | [QUICK_START.md](QUICK_START.md) | End-to-end quick-start guide from ONNX quantization to CSIM, RTL cocotb, and SoC simulation |
