@@ -117,12 +117,13 @@ python3 internal/compare.py \
 
 ### 4.1 公开基准模型一键 SoC 端到端验证
 
-公开回归矩阵包含 `model_c`、`model_e` 两个代号模型（各含 INT8 与 INT16 两种精度）：
+公开回归矩阵包含 `model_c`、`model_e`、`model_s` 三个代号模型（各含 INT8 与 INT16 两种精度）：
 
 ```bash
 # 一键完成：当场生成 CSIM 逐层 golden -> 打包固件 -> Verilator SoC 整网链式比对
 /data/sam/open-npu/soc/run_model_e2e.sh model_c_int8
 /data/sam/open-npu/soc/run_model_e2e.sh model_e_int8
+/data/sam/open-npu/soc/run_model_e2e.sh model_s_int8
 
 # 批量跑公开模型矩阵（余弦门 + SoC RTL 逐 word bit-exact 门）
 python3 /data/sam/open-npu/tools/internal/phase1_model_matrix.py --rtl
@@ -182,4 +183,4 @@ npu_status_t st = npu_run_model(model_bin, ext_mem_base, io_buf_base);
 | 数据类型 / 累加器 | 有符号 INT8 / INT16，44-bit 有符号累加器 |
 | 计算与后处理 | 64-lane K-major MAC Row + 8-lane 分时复用 PPU |
 | 片上 Scratchpad | `172 KB`（`32 KB IFM + 48 KB OFM + 80 KB WGT + 12 KB PARAM`，512-bit 宽读口） |
-| 全芯片综合规模 | Yosys 零黑盒 `npu_top`：`40,963` cells（`$div = 0`，`$mod = 0`） |
+| 全芯片综合规模 | Yosys 零黑盒 `npu_top`：`40,923` cells（`$div = 0`，`$mod = 0`） |

@@ -20,9 +20,9 @@ Open-NPU 是一颗挂载在 RISC-V SoC Wishbone 总线上的 **有符号 INT8 / 
 | 累加与偏置位宽 | 44-bit 有符号累加器 + 64-bit 有符号逐通道偏置 |
 | 数据类型 | 有符号 INT8、有符号 INT16（零点对称默认 `zp = 0`，同时支持非零 `in_zp / out_zp`） |
 | 模型描述符 | `NPU1` 离线格式（每层固定头 62 字节 + 逐通道 14 字节参数包） |
-| 全芯片真综合 | Yosys `synth -top npu_top` **0 黑盒**，总计 `40,963` cells（`$div = 0`，`$mod = 0`，`$print = 0`） |
+| 全芯片真综合 | Yosys `synth -top npu_top` **0 黑盒**，总计 `40,923` cells（`$div = 0`，`$mod = 0`，`$print = 0`） |
 
-公开仓库整网验收矩阵覆盖 **2 个公开代号模型（`model_c`、`model_e`）x 2 种位宽（INT8 / INT16）= 4 格**，每格必须同时通过两道门禁：
+公开仓库整网验收矩阵覆盖 **3 个公开代号模型（`model_c`、`model_e`、`model_s`）x 2 种位宽（INT8 / INT16）= 6 格**，每格必须同时通过两道门禁：
 
 1. **门 1（精度门）**：CSIM 反量化输出 vs ONNX Runtime FP32 余弦相似度达标（INT8 >= `0.95`，INT16 >= `0.99`）
 2. **门 2（硬件一致性门）**：SoC Verilator 链式推理输出 vs **当场**由当前 `onnx_converter + csim` 生成的逐层 golden **逐 32-bit word 完全一致（bit-exact）**
@@ -166,14 +166,15 @@ Elementwise Add 同样采用 **每拍 8 路（16 个乘法器）** 与 PPU 流�
 
 ---
 
-## 6. 公开基准模型矩阵（`model_c` / `model_e`）
+## 6. 公开基准模型矩阵（`model_c` / `model_e` / `model_s`）
 
-公开回归测试包含以下两个代号模型（共 4 个精度单元）：
+公开回归测试包含以下三个代号模型（共 6 个精度单元）：
 
 | 单元 | 模型代号 | 典型算子拓扑特征 | 余弦门禁 | SoC RTL 一致性状态 |
 |---|---|---|---|---|
 | `C8 / C16` | `model_c` | 大分辨率多尺度特征、MaxPool、上采样 Resize、通道 Concat（17 层） | `0.95 / 0.99` | 逐层逐 word bit-exact **PASS** |
 | `E8 / E16` | `model_e` | 深层常规卷积链、跨步下采样、双分支残差 Add（31 层） | `0.95 / 0.99` | 逐层逐 word bit-exact **PASS** |
+| `S8 / S16` | `model_s` | 倒残差深度可分离卷积长链、ReLU6、全局池化、全连接（64 层） | `0.95 / 0.99` | 逐层逐 word bit-exact **PASS** |
 
 常用回归入口：
 
@@ -181,8 +182,9 @@ Elementwise Add 同样采用 **每拍 8 路（16 个乘法器）** 与 PPU 流�
 # 跑单个公开代号模型的全链路（转换 + CSIM golden + 固件编译 + Verilator SoC 仿真）
 soc/run_model_e2e.sh model_c_int8
 soc/run_model_e2e.sh model_e_int8
+soc/run_model_e2e.sh model_s_int8
 
-# 跑公开 4 格矩阵（余弦门 + SoC RTL bit-exact 门）
+# 跑公开 6 格矩阵（余弦门 + SoC RTL bit-exact 门）
 python3 tools/internal/phase1_model_matrix.py --rtl
 
 # 跑全套门禁回归（单元测试 + 转换器守卫 + RTL cocotb + 公开矩阵）
@@ -206,6 +208,6 @@ python3 tools/internal/phase1_regression.py --mode quick
 - `tools/onnx_converter.py` — ONNX 图归一化、PTQ 量化、切块与 `NPU1` 生成
 - `tools/model_packer.py` — `NPU1` 描述符与 K-major 权重打包
 - `tools/tiling.py` / `tools/layer_fusion.py` / `tools/hw_config.py` — 硬件约束感知切块与层间融合分析
-- `tools/internal/gen/model_{a,c,e}_int{8,16}_golden.py` — 公开模型逐层 golden 生成脚本
+- `tools/internal/gen/model_{c,e,s}_int{8,16}_golden.py` — 公开模型逐层 golden 生成脚本
 - `csim/src/` — C 参考模拟器实现
 - `soc/firmware/main.c` / `soc/firmware/gen_soc_test.py` / `soc/run_model_e2e.sh` — RISC-V SoC 链式验证固件与一键运行脚本

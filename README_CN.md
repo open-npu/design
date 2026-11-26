@@ -8,7 +8,7 @@ Open-NPU 神经网络加速器的硬件架构、数据通路、二进制格式�
 
 | 文档 | 说明 |
 |------|------|
-| [open_npu_overview.md](open_npu_overview.md) | 整机地图 — ONNX -> CSIM -> SoC RTL 全链路、切块、融合与公开基准模型矩阵（`model_c`、`model_e`） |
+| [open_npu_overview.md](open_npu_overview.md) | 整机地图 — ONNX -> CSIM -> SoC RTL 全链路、切块、融合与公开基准模型矩阵（`model_c`、`model_e`、`model_s`） |
 | [rtl_design_overview.md](rtl_design_overview.md) | 信号级 RTL 实现总览（`npu_top`、64-lane Row、8-lane PPU、四库 512-bit SRAM） |
 | [mac_array_and_datapath.md](mac_array_and_datapath.md) | 64-lane K-major 行引擎、`wrow/abuf/avec` 单写口分库、DW 折叠复用与激活喂入数据通路 |
 | [architecture-spec.md](architecture-spec.md) | 系统架构设计规格 — 架构权衡、定点位宽推导、空间切块与双缓冲设计 |
@@ -44,9 +44,9 @@ Open-NPU 神经网络加速器的硬件架构、数据通路、二进制格式�
 |---------------|------|------|
 | 单元 cocotb 测试 | CSR、SRAM、PPU、DMA、Ctrl、Compute | `50/50 通过` |
 | 集成 cocotb 测试 | Top、Super-block CSR、Param 预取、Tiling、利用率 | `61/61 通过` |
-| 鲁棒性与 E2E cocotb 测试 | WB 协议、Abort/Reset、边界异常、DMA E2E（`model_c/e` 及合成算子链） | `45/45 通过` |
-| SoC Verilator 整网链式 E2E | 公开代号模型（`model_c`、`model_e` 的 INT8 与 INT16） | 逐层逐 word bit-exact 通过 |
-| Yosys 全芯片真综合（`synth -top npu_top`，0 黑盒） | 全部可综合 RTL 模块（`172 KB` SRAM + `102,400`-bit 内部 bank 全部推断为 `$mem_v2`） | **`40,963` cells**（`npu_compute`: `29,010`，`$adff`: `886`，`$mul`: `488`，`$div`: `0`，`$mod`: `0`） |
+| 鲁棒性与 E2E cocotb 测试 | WB 协议、Abort/Reset、边界异常、DMA E2E（`model_c/e/s` 及合成算子链） | `45/45 通过` |
+| SoC Verilator 整网链式 E2E | 公开代号模型（`model_c`、`model_e`、`model_s` 的 INT8 与 INT16） | 逐层逐 word bit-exact 通过 |
+| Yosys 全芯片真综合（`synth -top npu_top`，0 黑盒） | 全部可综合 RTL 模块（`172 KB` SRAM + `102,400`-bit 内部 bank 全部推断为 `$mem_v2`） | **`40,923` cells**（`npu_compute`: `28,973`，`$adff`: `886`，`$mul`: `489`，`$div`: `0`，`$mod`: `0`） |
 
 ## 相关仓库
 

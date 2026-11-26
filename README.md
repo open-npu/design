@@ -8,7 +8,7 @@ Hardware architecture, datapath, binary format, and CSR specifications for the O
 
 | Document | Description |
 |----------|-------------|
-| [open_npu_overview.md](open_npu_overview.md) | Whole-chip map — ONNX -> CSIM -> SoC RTL, tiling, fusion, and public model matrix (`model_c`, `model_e`) |
+| [open_npu_overview.md](open_npu_overview.md) | Whole-chip map — ONNX -> CSIM -> SoC RTL, tiling, fusion, and public model matrix (`model_c`, `model_e`, `model_s`) |
 | [rtl_design_overview.md](rtl_design_overview.md) | Signal-level RTL implementation guide (`npu_top`, 64-lane Row, 8-lane PPU, 4-bank 512-bit SRAM) |
 | [mac_array_and_datapath.md](mac_array_and_datapath.md) | 64-lane K-major Row Engine, `wrow/abuf/avec` banking, DW folding, and activation feed datapath |
 | [architecture-spec.md](architecture-spec.md) | System architecture specification — design rationale, precision analysis, tiling, and double buffering |
@@ -44,9 +44,9 @@ Hardware architecture, datapath, binary format, and CSR specifications for the O
 |----------------|-------|--------|
 | Unit cocotb tests | CSR, SRAM, PPU, DMA, Ctrl, Compute | `50/50 PASS` |
 | Integration cocotb tests | Top, Super-block CSR, Param prefetch, Tiling, Util | `61/61 PASS` |
-| Robustness & E2E cocotb tests | WB protocol, Abort/Reset, Edge cases, DMA E2E (`model_c/e` + synthetic chains) | `45/45 PASS` |
-| SoC Verilator full-network E2E | Public coded models (`model_c`, `model_e` in INT8 & INT16) | Layer-by-layer bit-exact PASS |
-| Full-chip Yosys synthesis (`synth -top npu_top`, 0 black boxes) | All 8 active RTL modules (`172 KB` SRAM + `102,400`-bit compute bank RAMs inferred as `$mem_v2`) | **`40,963` cells** (`npu_compute`: `29,010`, `$adff`: `886`, `$mul`: `488`, `$div`: `0`, `$mod`: `0`) |
+| Robustness & E2E cocotb tests | WB protocol, Abort/Reset, Edge cases, DMA E2E (`model_c/e/s` + synthetic chains) | `45/45 PASS` |
+| SoC Verilator full-network E2E | Public coded models (`model_c`, `model_e`, `model_s` in INT8 & INT16) | Layer-by-layer bit-exact PASS |
+| Full-chip Yosys synthesis (`synth -top npu_top`, 0 black boxes) | All 8 active RTL modules (`172 KB` SRAM + `102,400`-bit compute bank RAMs inferred as `$mem_v2`) | **`40,923` cells** (`npu_compute`: `28,973`, `$adff`: `886`, `$mul`: `489`, `$div`: `0`, `$mod`: `0`) |
 
 ## Related Repositories
 
