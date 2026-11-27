@@ -163,4 +163,4 @@ npu_status_t st = npu_run_model(model_bin, ext_mem_base, io_buf_base);
 | 数据类型 / 累加器 | 有符号 INT8 / INT16，44-bit 有符号累加器 |
 | 计算与后处理 | 64-lane K-major MAC Row + 8-lane 分时复用 PPU |
 | 片上 Scratchpad | `172 KB`（`32 KB IFM + 48 KB OFM + 80 KB WGT + 12 KB PARAM`，512-bit 宽读口） |
-| 全芯片综合规模 | Yosys 零黑盒 `npu_top`：`40,923` cells（`$div = 0`，`$mod = 0`） |
+| 全芯片综合规模 | Yosys 零黑盒 `npu_top`：`44,626` cells（`$div = 0`，`$mod = 0`） |

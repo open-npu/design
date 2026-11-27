@@ -20,7 +20,7 @@ Open-NPU 是一颗挂载在 RISC-V SoC Wishbone 总线上的 **有符号 INT8 / 
 | 累加与偏置位宽 | 44-bit 有符号累加器 + 64-bit 有符号逐通道偏置 |
 | 数据类型 | 有符号 INT8、有符号 INT16（零点对称默认 `zp = 0`，同时支持非零 `in_zp / out_zp`） |
 | 模型描述符 | `NPU1` 离线格式（每层固定头 62 字节 + 逐通道 14 字节参数包） |
-| 全芯片真综合 | Yosys `synth -top npu_top` **0 黑盒**，总计 `40,923` cells（`$div = 0`，`$mod = 0`，`$print = 0`） |
+| 全芯片真综合 | Yosys `synth -top npu_top` **0 黑盒**，总计 `44,626` cells（`$div = 0`，`$mod = 0`，`$print = 0`） |
 
 公开仓库整网验收矩阵覆盖 **3 个公开代号模型（`model_c`、`model_e`、`model_s`）x 2 种位宽（INT8 / INT16）= 6 格**，每格必须同时通过两道门禁：
 

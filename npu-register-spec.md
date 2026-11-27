@@ -38,7 +38,7 @@
 | `0x180 - 0x19F` | Group 3A | 后处理（PPU）与双分支 Add 配置 |
 | `0x1A0 - 0x1FF` | Group 3B | 计算状态机细粒度周期直方图计数器（RO） |
 | `0x200 - 0x3FF` | Group 4 | 保留（历史 LUT 激活表已裁撤，`HAS_LUT = 0`，读回 `0`） |
-| `0x400 - 0x4AF` | Group 5 | Super-Block 描述符窗口（3 个槽位 x 44 个 32-bit 字） |
+| `0x400 - 0x4AF` | Group 5 | Super-Block 描述符窗口（最多 4 个槽位 x 44 个 32-bit 字） |
 | `0x4B0 - 0xFFF` | — | 保留 |
 
 ---
@@ -167,13 +167,13 @@
 | `0x13C` | `TILE_IN_HW` | RW | `[31:16]` `TILE_IN_H`，`[15:0]` `TILE_IN_W` |
 | `0x140` | `DMA_STORE_MODE` | RW | `[0]` `PER_TILE_STORE_EN`（切块按 2D 行距写回主存大图） |
 | `0x144` | `DMA_ROW_CFG` | RW | `[31:16]` `ROW_COUNT`，`[15:0]` `ROW_LEN`（2D DMA 配置） |
-| `0x148` | `DMA_WGT_PER_OC` | RW | 每个 `oc_group` 对应的权重 32-bit 字数（`0` = 全层常驻不重载） |
+| `0x148` | `DMA_WGT_PER_OC` | RW | `[29:0]` 每组权重 32-bit 字数（`0` = 常驻不重载）；`[30]` 启用 `2 x 40 KB` 权重 Ping-Pong；`[31]` K-slice 流式模式 |
 | `0x14C` | `WGT_LAYOUT` | RW | `[0]` `1` = K-major 64-lane 打包布局（现行标准）；`0` = 旧版兼容 |
 | `0x150` | `NEXT_PARAM_ADDR` | RW | 下一层逐通道参数预取主存地址 |
 | `0x154` | `NEXT_PARAM_CFG` | RW | `[31]` 预取使能，`[15:0]` 预取 32-bit 字数 |
 | `0x158` | `PARAM_BANK_CTRL` | RW | 参数 SRAM 前后半区（ping/pong）读取与预取目标选择 |
 | `0x15C` | `PARAM_BANK_STATUS` | RO | `[31:16]` 半库深度（words），`[0]` `NEXT_PARAM_READY` |
-| `0x160` | `SUPER_CTRL` | RW | `[0]` Super-Block 请求，`[2:1]` 启动槽位，`[9:8]` 窗口映射槽位（`0..2`） |
+| `0x160` | `SUPER_CTRL` | RW | `[0]` Super-Block 请求，`[2:1]` 启动槽位，`[3]` 启用第 4 槽残差 `Add`，`[4]` 按阶段流式加载参数，`[9:8]` 窗口映射槽位（`0..3`） |
 | `0x164` | `SUPER_STATUS` | RO | `[3:2]` 当前激活槽位，`[1]` 冻结标志，`[0]` 硬件多槽状态机使能标志 |
 
 ---
@@ -220,7 +220,7 @@ acc(44-bit) -> + bias_q[ch] -> * M[ch] + (1 << (S[ch]-1)) -> >>> S[ch] -> + zp[c
 
 ## 7. Group 5：Super-Block 描述符窗口 (`0x400 - 0x4AF`)
 
-当 `SUPER_CTRL[9:8]` 选择槽位 `s`（`0 <= s <= 2`）且未处于运行冻结态时，向 `0x400 + 4*w`（`0 <= w < 44`）读写即访问第 `s` 槽的第 `w` 个层描述符寄存器镜像。写入 `NPU_CTRL.START` 的同一总线周期若 `SUPER_CTRL[0] == 1`，硬件原子冻结当前启动槽位，防止运行期描述符被意外改写。
+当 `SUPER_CTRL[9:8]` 选择槽位 `s`（默认 `0 <= s <= 2`，当 `SUPER_CTRL[3] == 1` 时开放第 4 槽 `s == 3`）且未处于运行冻结态时，向 `0x400 + 4*w`（`0 <= w < 44`）读写即访问第 `s` 槽的第 `w` 个层描述符寄存器镜像。写入 `NPU_CTRL.START` 的同一总线周期若 `SUPER_CTRL[0] == 1`，硬件原子冻结当前启动槽位，防止运行期描述符被意外改写。
 
 ---
 

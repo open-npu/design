@@ -45,7 +45,7 @@ Open-NPU 神经网络加速器的硬件架构、数据通路、二进制格式�
 | 集成 cocotb 测试 | Top、Super-block CSR、Param 预取、Tiling、利用率 | `61/61 通过` |
 | 鲁棒性与 E2E cocotb 测试 | WB 协议、Abort/Reset、边界异常、DMA E2E（`model_c/e/s` 及合成算子链） | `45/45 通过` |
 | SoC Verilator 整网链式 E2E | 公开代号模型（`model_c`、`model_e`、`model_s` 的 INT8 与 INT16） | 逐层逐 word bit-exact 通过 |
-| Yosys 全芯片真综合（`synth -top npu_top`，0 黑盒） | 全部可综合 RTL 模块（`172 KB` SRAM + `102,400`-bit 内部 bank 全部推断为 `$mem_v2`） | **`40,923` cells**（`npu_compute`: `28,973`，`$adff`: `886`，`$mul`: `489`，`$div`: `0`，`$mod`: `0`） |
+| Yosys 全芯片真综合（`synth -top npu_top`，0 黑盒） | 全部可综合 RTL 模块（`172 KB` SRAM + `102,400`-bit 内部 bank 全部推断为 `$mem_v2`） | **`44,626` cells**（`$adff`: `994`，`$mul`: `526`，`$div`: `0`，`$mod`: `0`） |
 
 ## 相关仓库
 

@@ -45,7 +45,7 @@ Hardware architecture, datapath, binary format, and CSR specifications for the O
 | Integration cocotb tests | Top, Super-block CSR, Param prefetch, Tiling, Util | `61/61 PASS` |
 | Robustness & E2E cocotb tests | WB protocol, Abort/Reset, Edge cases, DMA E2E (`model_c/e/s` + synthetic chains) | `45/45 PASS` |
 | SoC Verilator full-network E2E | Public coded models (`model_c`, `model_e`, `model_s` in INT8 & INT16) | Layer-by-layer bit-exact PASS |
-| Full-chip Yosys synthesis (`synth -top npu_top`, 0 black boxes) | All 8 active RTL modules (`172 KB` SRAM + `102,400`-bit compute bank RAMs inferred as `$mem_v2`) | **`40,923` cells** (`npu_compute`: `28,973`, `$adff`: `886`, `$mul`: `489`, `$div`: `0`, `$mod`: `0`) |
+| Full-chip Yosys synthesis (`synth -top npu_top`, 0 black boxes) | All 8 active RTL modules (`172 KB` SRAM + `102,400`-bit compute bank RAMs inferred as `$mem_v2`) | **`44,626` cells** (`$adff`: `994`, `$mul`: `526`, `$div`: `0`, `$mod`: `0`) |
 
 ## Related Repositories
 
