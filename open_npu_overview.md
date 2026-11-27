@@ -170,11 +170,11 @@ Elementwise Add 同样采用 **每拍 8 路（16 个乘法器）** 与 PPU 流�
 
 公开回归测试包含以下三个代号模型（共 6 个精度单元）：
 
-| 单元 | 模型代号 | 典型算子拓扑特征 | 余弦门禁 | SoC RTL 一致性状态 |
-|---|---|---|---|---|
-| `C8 / C16` | `model_c` | 大分辨率多尺度特征、MaxPool、上采样 Resize、通道 Concat（17 层） | `0.95 / 0.99` | 逐层逐 word bit-exact **PASS** |
-| `E8 / E16` | `model_e` | 深层常规卷积链、跨步下采样、双分支残差 Add（31 层） | `0.95 / 0.99` | 逐层逐 word bit-exact **PASS** |
-| `S8 / S16` | `model_s` | 倒残差深度可分离卷积长链、ReLU6、全局池化、全连接（64 层） | `0.95 / 0.99` | 逐层逐 word bit-exact **PASS** |
+| 单元 | 模型代号 | 典型算子拓扑特征 | `32b -> 128b` 纯推理周期 | `128b` 绝对峰值 MAC 利用率（架构有效效率） | SoC RTL 一致性状态 |
+|---|---|---|---|---|---|
+| `C8 / C16` | `model_c` | 大分辨率多尺度特征、MaxPool、上采样 Resize、通道 Concat（17 层） | `24.85M -> 22.32M` | `63.1%`（`92.8%`） | 逐层逐 word bit-exact **PASS** |
+| `E8 / E16` | `model_e` | 深层常规卷积链、跨步下采样、双分支残差 Add（31 层） | `36.18M -> 32.41M` | `87.5%`（`87.5%`） | 逐层逐 word bit-exact **PASS** |
+| `S8 / S16` | `model_s` | 倒残差深度可分离卷积长链、ReLU6、全局池化、全连接（64 层） | `15.69M -> 9.36M` (`1.68x`) | `50.2%`（`91.2%`） | 逐层逐 word bit-exact **PASS** |
 
 常用回归入口：
 
@@ -182,10 +182,13 @@ Elementwise Add 同样采用 **每拍 8 路（16 个乘法器）** 与 PPU 流�
 # 打包器与 C 参考模拟器自检
 python3 tools/model_packer.py test
 
-# 跑单个公开代号模型的 SoC Verilator 整网链式推理
+# RTL 6 种外部总线配置矩阵自检 (32/64/128-bit x WB/AXI4)
+make -C rtl test-bus-cfg
+
+# 跑单个公开代号模型的 SoC Verilator 整网链式推理（默认 32-bit，可传 DMA_BUS_WIDTH=64|128）
 soc/run_model_e2e.sh model_c_int8
 soc/run_model_e2e.sh model_e_int8
-soc/run_model_e2e.sh model_s_int8
+DMA_BUS_WIDTH=128 soc/run_model_e2e.sh model_s_int8
 ```
 
 ---
@@ -193,13 +196,14 @@ soc/run_model_e2e.sh model_s_int8
 ## 7. 关键文件索引
 
 **硬件（`rtl/`）**：
-- `rtl/include/npu_defines.vh` — 通道宽度（`MAC_LANES=64`、`PPU_LANES=8`）、四库 SRAM 容量（`172 KB`）与寄存器基址
-- `rtl/src/npu_top.v` — 顶层互连、四库 `npu_sram_wide` 实例化与 bank 切换
-- `rtl/src/npu_csr.v` — Wishbone CSR 寄存器堆、性能直方图与 Super-Block 3 槽描述符窗
-- `rtl/src/npu_ctrl.v` — 层级 DMA / 计算主状态机、OC 重载、双缓冲与硬件合法性守卫
+- `rtl/include/npu_defines.vh` — 通道宽度（`MAC_LANES=64`、`PPU_LANES=8`）、四库 SRAM 容量（`172 KB`）、外部 DMA 总线参数（`DMA_BUS_WIDTH=32/64/128`、`DMA_BUS_PROTO=0/1`）与寄存器基址
+- `rtl/src/npu_top.v` — 顶层互连、读写双通道 DMA、四库 SRAM 实例化与可选 AXI4 桥
+- `rtl/src/npu_csr.v` — Wishbone CSR 寄存器堆、性能直方图与 Super-Block 4 槽描述符窗
+- `rtl/src/npu_ctrl.v` — 层级 DMA / 计算主状态机、WGT/PARAM 乒乓预取、双缓冲与硬件合法性守卫
 - `rtl/src/npu_compute.v` — 64-lane Row 乘加、DW 折叠复用、Pooling / Add / Resize 微定序器
 - `rtl/src/npu_ppu_bank.v` / `rtl/src/npu_ppu.v` — 8-lane 4 级后处理流水线
-- `rtl/src/npu_dma.v` — 1D 连续与 2D strided Wishbone 主控 DMA
+- `rtl/src/npu_dma.v` — 参数化 `32/64/128-bit` 1D 连续与 2D strided 突发主控 DMA
+- `rtl/src/npu_wb_to_axi4.v` — 可综合 `32/64/128-bit` AXI4 `INCR` 突发主接口桥
 
 **工具链与仿真（`tools/`、`csim/`、`soc/`）**：
 - `tools/onnx_converter.py` — ONNX 图归一化、PTQ 量化、切块与 `NPU1` 生成

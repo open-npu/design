@@ -20,8 +20,8 @@ Hardware architecture, datapath, binary format, and CSR specifications for the O
 - **Compute Core**: Unified 64-lane K-major MAC Row Engine (`64 MACs/cycle`), executing Conv2D, FC, and Depthwise Conv2D (reusing `wrow` and `racc`)
 - **Post-Processing**: 8-lane time-multiplexed PPU (`PPU_LANES=8`, 4-stage pipeline, INT64 bias + per-channel multiply-shift-clamp) + 8-lane pipelined Elementwise Add
 - **Precision**: Signed INT8 and INT16 activations/weights with 44-bit signed accumulators
-- **Scratchpad SRAM**: 172 KB split 4-bank architecture (`32 KB IFM + 48 KB OFM + 80 KB WGT + 12 KB PARAM`, 512-bit compute ports, 32-bit DMA ports)
-- **Bus Interface**: Wishbone-B4 32-bit CSR slave + Wishbone-B4 32-bit pipelined DMA master
+- **Scratchpad SRAM**: 172 KB split 4-bank architecture (`32 KB IFM + 48 KB OFM + 80 KB WGT + 12 KB PARAM`, 512-bit compute ports, parameterized `32/64/128-bit` DMA ports)
+- **Bus Interface**: Wishbone-B4 32-bit CSR slave + compile-time configurable `32 / 64 / 128-bit` decoupled dual-channel DMA master (`Wishbone-B4` or `AXI4 INCR` burst)
 - **Peak Throughput**: `12.8 GMAC/s` (`25.6 GOPS`) @ `200 MHz`
 
 ## Supported Operators (RTL Bit-Exact Verified)
@@ -43,9 +43,9 @@ Hardware architecture, datapath, binary format, and CSR specifications for the O
 |----------------|-------|--------|
 | Unit cocotb tests | CSR, SRAM, PPU, DMA, Ctrl, Compute | `50/50 PASS` |
 | Integration cocotb tests | Top, Super-block CSR, Param prefetch, Tiling, Util | `61/61 PASS` |
-| Robustness & E2E cocotb tests | WB protocol, Abort/Reset, Edge cases, DMA E2E (`model_c/e/s` + synthetic chains) | `45/45 PASS` |
-| SoC Verilator full-network E2E | Public coded models (`model_c`, `model_e`, `model_s` in INT8 & INT16) | Layer-by-layer bit-exact PASS |
-| Full-chip Yosys synthesis (`synth -top npu_top`, 0 black boxes) | All 8 active RTL modules (`172 KB` SRAM + `102,400`-bit compute bank RAMs inferred as `$mem_v2`) | **`44,626` cells** (`$adff`: `994`, `$mul`: `526`, `$div`: `0`, `$mod`: `0`) |
+| Robustness & E2E cocotb + bus matrix | WB/AXI4 `32/64/128-bit` matrix (`make test-bus-cfg`), Abort/Reset, DMA E2E (`model_c/e/s`) | `45/45 + 6/6 PASS` |
+| SoC Verilator full-network E2E | Public coded models (`model_c`, `model_e`, `model_s` across `32/64/128-bit` DMA) | Layer-by-layer bit-exact PASS (`87.5%` peak MAC util on `model_e`, `50.2%` on 64-layer `model_s` @ `128-bit`) |
+| Full-chip Yosys synthesis (`synth -top npu_top`, 0 black boxes) | All synthesizable RTL modules (`$div = 0`, `$mod = 0`) | **`44,626` cells** (`32b WB`) / **`45,441` cells** (`128b AXI4`, `+1.83%`) |
 
 ## Related Repositories
 

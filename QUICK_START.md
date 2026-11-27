@@ -103,10 +103,10 @@ python3 onnx_converter.py \
 公开回归覆盖 `model_c`、`model_e`、`model_s` 三个代号模型（各含 INT8 与 INT16 两种精度）：
 
 ```bash
-# 打包固件并运行 Verilator SoC 整网链式比对
+# 打包固件并运行 Verilator SoC 整网链式比对（默认 32-bit，可通过 DMA_BUS_WIDTH=64|128 切换宽口总线）
 ./soc/run_model_e2e.sh model_c_int8
 ./soc/run_model_e2e.sh model_e_int8
-./soc/run_model_e2e.sh model_s_int8
+DMA_BUS_WIDTH=128 ./soc/run_model_e2e.sh model_s_int8
 ```
 
 ### 4.2 RTL cocotb 模块与集成回归
@@ -163,4 +163,5 @@ npu_status_t st = npu_run_model(model_bin, ext_mem_base, io_buf_base);
 | 数据类型 / 累加器 | 有符号 INT8 / INT16，44-bit 有符号累加器 |
 | 计算与后处理 | 64-lane K-major MAC Row + 8-lane 分时复用 PPU |
 | 片上 Scratchpad | `172 KB`（`32 KB IFM + 48 KB OFM + 80 KB WGT + 12 KB PARAM`，512-bit 宽读口） |
-| 全芯片综合规模 | Yosys 零黑盒 `npu_top`：`44,626` cells（`$div = 0`，`$mod = 0`） |
+| 外部总线规格 | `32-bit` Wishbone-B4 CSR 从口 + 参数化 `32/64/128-bit` `Wishbone-B4` 或 `AXI4` 突发 DMA 主口 |
+| 全芯片综合规模 | Yosys 零黑盒 `npu_top`：`44,626` cells（`32b WB`）/ `45,441` cells（`128b AXI4`，`+1.83%`） |

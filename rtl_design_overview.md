@@ -2,25 +2,26 @@
 
 本文档描述 **当前 `rtl/src/` 可综合硬件的实际模块结构、接口信号、状态机握手、硬件守卫与零黑盒综合指标**。进行 RTL 修改、编写底层固件驱动或评估 PPA 时，以本文档与 `npu-register-spec.md` 为准。
 
-代码基线：`MAC_LANES = 64`，`PPU_LANES = 8`，`SPAD_KB = 172`（`32 KB IFM + 48 KB OFM + 80 KB WGT + 12 KB PARAM`），`SRAM_B_WIDTH = 512`，`ACC_WIDTH = 44`。
+代码基线：`MAC_LANES = 64`，`PPU_LANES = 8`，`SPAD_KB = 172`（`32 KB IFM + 48 KB OFM + 80 KB WGT + 12 KB PARAM`），`SRAM_B_WIDTH = 512`，`ACC_WIDTH = 44`，外部 DMA 主口编译期可配置 `DMA_BUS_WIDTH = 32 / 64 / 128` 与 `DMA_BUS_PROTO = 0 (Wishbone-B4) / 1 (AXI4)`（默认 `32-bit Wishbone-B4`）。
 
 ---
 
 ## 1. 模块清单与层次结构
 
-`rtl/src/` 共包含 9 个 Verilog-2005 源文件（合计约 `9.3K` 行），全芯片单时钟域、异步低有效复位，**零黑盒**通过 Yosys 综合：
+`rtl/src/` 共包含 10 个 Verilog-2005 源文件，全芯片单时钟域、异步低有效复位，**零黑盒**通过 Yosys 综合：
 
 | 模块文件 | 行数 | 职责 |
 |---|---|---|
-| `npu_top.v` | `1,061` | 顶层封装；例化 4 块 512-bit 宽口 SRAM，管理 DMA/Compute 端口仲裁、双缓冲偏移与跨层 bank 互换 |
-| `npu_csr.v` | `611` | Wishbone-B4 从接口寄存器堆、3 槽 Super-Block 描述符窗与性能计数器直方图 |
-| `npu_ctrl.v` | `2,370` | 层级主控制器：DMA 阶段调度、空间 tile 循环、OC 分组重载、参数 ping/pong 预取与 E1-E9 硬件守卫 |
-| `npu_dma.v` | `423` | Wishbone-B4 主接口 DMA，支持 1D 连续突发与 2D strided 矩形搬运 |
-| `npu_compute.v` | `4,300` | 核心计算微定序器：64-bank 缓冲、64-lane K-major 行引擎、DW 折叠复用、Pool / Add / Resize / Concat |
+| `npu_top.v` | `~1,300` | 顶层封装；例化读写双通道 DMA、4 块片上 SRAM 与可选 AXI4 桥，管理端口仲裁、双缓冲与跨层互换 |
+| `npu_csr.v` | `~650` | Wishbone-B4 从接口寄存器堆、4 槽 Super-Block 描述符窗与性能计数器直方图 |
+| `npu_ctrl.v` | `~2,840` | 层级主控制器：DMA 读写解耦调度、空间 tile 循环、WGT/PARAM 乒乓预取与 E1-E9 硬件守卫 |
+| `npu_dma.v` | `~520` | 参数化 `32/64/128-bit` 突发主控 DMA，支持任意 4B 对齐首尾掩码、1D 连续与 2D strided 搬运 |
+| `npu_wb_to_axi4.v` | `~240` | 可选可综合 AXI4 `INCR` 突发桥（16-beat 读写突发、4KB 边界裁剪、写响应 `BVALID` 严格保序） |
+| `npu_compute.v` | `~4,300` | 核心计算微定序器：64-bank 缓冲、64-lane K-major 行引擎、DW 折叠复用、Pool / Add / Resize / Concat |
 | `npu_ppu_bank.v` | `96` | 8-lane 后处理阵列封装（`PPU_LANES = 8`） |
 | `npu_ppu.v` | `317` | 单通道 4 级后处理流水线（INT64 bias 对齐累加、15-bit 乘数 + 6-bit 算术右移舍入、零点与钳位） |
-| `npu_sram_wide.v` | `84` | 混合位宽双端口同步 SRAM（Port A 32-bit DMA，Port B 512-bit 计算读 / 64-byte 掩码写） |
-| `npu_sram.v` | `57` | 通用 32-bit 对称双端口同步 SRAM 基础组件 |
+| `npu_sram_wide.v` | `~105` | 混合位宽双端口同步 SRAM（Port A `32/64/128-bit` 字掩码 DMA 写，Port B 512-bit 计算读写） |
+| `npu_sram.v` | `~70` | 参数化 Port A `32/64/128-bit` 字掩码写 + Port B 32-bit 读双端口同步 SRAM |
 
 > 已退役模块：历史版本的 `npu_systolic.v`、`npu_pe.v`、`npu_dw_conv.v`、`npu_dw_bank.v` 均已彻底移除；稠密卷积、全连接与深度可分离卷积统一由 `npu_compute.v` 的 64-lane 行引擎承载。
 
@@ -43,24 +44,25 @@ npu_top
 
 ```verilog
 module npu_top #(
-    parameter ARRAY_SIZE  = `ARRAY_SIZE,    // 8 (DW 通道组宽度兼容参数)
-    parameter IFM_KB      = `IFM_KB,        // 32
-    parameter OFM_KB      = `OFM_KB,        // 48
-    parameter WGT_KB      = `WGT_KB,        // 80
-    parameter PARAM_KB    = `PARAM_KB,      // 12
-    parameter SRAM_B_W    = `SRAM_B_WIDTH,  // 512
-    parameter MAC_LANES_P = `MAC_LANES,     // 64
-    parameter PPU_LANES_P = `PPU_LANES      // 8
+    parameter ARRAY_SIZE  = `ARRAY_SIZE,     // 8 (DW 通道组宽度兼容参数)
+    parameter IFM_KB      = `IFM_KB,         // 32
+    parameter OFM_KB      = `OFM_KB,         // 48
+    parameter WGT_KB      = `WGT_KB,         // 80
+    parameter PARAM_KB    = `PARAM_KB,       // 12
+    parameter SRAM_B_W    = `SRAM_B_WIDTH,   // 512
+    parameter MAC_LANES_P = `MAC_LANES,      // 64
+    parameter PPU_LANES_P = `PPU_LANES,      // 8
+    parameter DMA_DATA_W  = `DMA_BUS_WIDTH   // 32 (默认) / 64 / 128
 )
 ```
 
 | 信号组 | 方向 | 说明 |
 |---|---|---|
 | `clk`, `rst_n` | in | 单时钟域，异步低有效复位 |
-| `wb_cyc_i, wb_stb_i, wb_we_i, wb_adr_i[11:0], wb_dat_i[31:0], wb_sel_i[3:0]` | in | Wishbone-B4 CSR 从端口（4 KB 地址空间） |
-| `wb_dat_o[31:0], wb_ack_o` | out | Wishbone-B4 CSR 读数据与单拍应答 |
-| `wbm_cyc_o, wbm_stb_o, wbm_we_o, wbm_adr_o[31:0], wbm_dat_o[31:0], wbm_sel_o[3:0]` | out | Wishbone-B4 DMA 主端口 |
-| `wbm_dat_i[31:0], wbm_ack_i, wbm_err_i` | in | Wishbone-B4 DMA 读数据、应答与总线错误 |
+| `wb_slv_cyc_i, wb_slv_stb_i, wb_slv_we_i, wb_slv_adr_i[11:0], wb_slv_dat_i[31:0], wb_slv_sel_i[3:0]` | in | Wishbone-B4 CSR 从端口（4 KB 地址空间） |
+| `wb_slv_dat_o[31:0], wb_slv_ack_o` | out | Wishbone-B4 CSR 读数据与单拍应答 |
+| `wb_mst_*`（默认未定义 `DMA_AXI4`） | in/out | 参数化 `32/64/128-bit` Wishbone-B4 DMA 突发主端口 |
+| `m_axi_aw* / w* / b* / ar* / r*`（定义 `DMA_AXI4` 时） | in/out | 参数化 `32/64/128-bit` 标准 AXI4 `INCR` 突发主端口 |
 | `irq_o` | out | 电平中断输出：`|(IRQ_STATUS & IRQ_EN)` |
 
 ---
@@ -126,8 +128,11 @@ CPU 只配置 CSR 并写 `CTRL_START`，层内所有分块与重载均由硬件�
 
 ---
 
-## 6. 裁剪或调整 SRAM 容量的方法
+## 6. 编译期参数化配置（SRAM 容量与外部 DMA 总线）
 
-修改硬件片上存储预算只需同步两处配置：
-1. `rtl/include/npu_defines.vh` 中的 `IFM_KB`、`OFM_KB`、`WGT_KB`、`PARAM_KB` 宏定义（`npu_top`、`npu_ctrl` 的 E1-E9 守卫及 `HW_CONFIG` 只读寄存器会自动派生更新）；
-2. `tools/hw_config.py` 中对应的四库容量参数，确保离线编译器算出的空间切块（tiling）与 OC 重载分组严格匹配目标硬件。
+修改硬件片上存储预算或外部主存接口规格只需通过编译宏 / 工具链参数统一配置：
+1. **片上 SRAM 容量**：修改 `rtl/include/npu_defines.vh`（或编译参数 `-DIFM_KB=... -DOFM_KB=... -DWGT_KB=... -DPARAM_KB=...`）与 `tools/hw_config.py` 中的对应容量；
+2. **外部 DMA 总线位宽与协议**：
+   - `DMA_BUS_WIDTH`：`32`（默认）、`64` 或 `128`（控制 DMA 数据位宽与 4 块片上 SRAM Port A 写入位宽，硬件自动处理任意 4B 对齐起止地址与字节/字写掩码）；
+   - `DMA_BUS_PROTO`：`0` = Wishbone-B4 Master（默认），`1` / `-DDMA_AXI4` = AXI4 `INCR` 突发主接口（经 `npu_wb_to_axi4` 输出标准 `m_axi_*` 端口；`128-bit AXI4` 全芯片 Yosys 综合为 `45,441` cells，较默认 `32-bit WB` 仅增加 `+1.83%`）；
+   - LiteX SoC 仿真可通过 `DMA_BUS_WIDTH=32|64|128` 一键切换“32-bit CPU 控制总线 + 宽口主存数据总线”双层架构。

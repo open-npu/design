@@ -20,8 +20,8 @@ Open-NPU 神经网络加速器的硬件架构、数据通路、二进制格式�
 - **计算核心**：统一 64-lane K-major MAC 行引擎（`64 MACs/cycle`），统一承载 Conv2D、FC 与 Depthwise Conv2D（DW 复用 `wrow` 与 `racc`）
 - **后处理通路**：8-lane 分时复用 PPU（`PPU_LANES=8`，4 级流水，INT64 bias + 逐通道乘移截断）+ 8-lane 流水双分支 Elementwise Add
 - **数据精度**：有符号 INT8 / INT16 激活与权重，44-bit 有符号累加器
-- **片上存储**：172 KB 独立四库 Scratchpad（`32 KB IFM + 48 KB OFM + 80 KB WGT + 12 KB PARAM`，计算侧 512-bit 宽口，DMA 侧 32-bit 端口）
-- **总线接口**：Wishbone-B4 32-bit CSR 从接口 + Wishbone-B4 32-bit 流水 DMA 主接口
+- **片上存储**：172 KB 独立四库 Scratchpad（`32 KB IFM + 48 KB OFM + 80 KB WGT + 12 KB PARAM`，计算侧 512-bit 宽口，DMA 侧参数化 `32/64/128-bit` 端口）
+- **总线接口**：Wishbone-B4 32-bit CSR 从接口 + 编译期可配置 `32 / 64 / 128-bit` 读写解耦双通道 DMA 主接口（支持 `Wishbone-B4` 与 `AXI4 INCR` 突发）
 - **峰值算力**：`12.8 GMAC/s`（`25.6 GOPS`）@ `200 MHz`
 
 ## 支持的算子（RTL 逐比特验证通过）
@@ -43,9 +43,9 @@ Open-NPU 神经网络加速器的硬件架构、数据通路、二进制格式�
 |---------------|------|------|
 | 单元 cocotb 测试 | CSR、SRAM、PPU、DMA、Ctrl、Compute | `50/50 通过` |
 | 集成 cocotb 测试 | Top、Super-block CSR、Param 预取、Tiling、利用率 | `61/61 通过` |
-| 鲁棒性与 E2E cocotb 测试 | WB 协议、Abort/Reset、边界异常、DMA E2E（`model_c/e/s` 及合成算子链） | `45/45 通过` |
-| SoC Verilator 整网链式 E2E | 公开代号模型（`model_c`、`model_e`、`model_s` 的 INT8 与 INT16） | 逐层逐 word bit-exact 通过 |
-| Yosys 全芯片真综合（`synth -top npu_top`，0 黑盒） | 全部可综合 RTL 模块（`172 KB` SRAM + `102,400`-bit 内部 bank 全部推断为 `$mem_v2`） | **`44,626` cells**（`$adff`: `994`，`$mul`: `526`，`$div`: `0`，`$mod`: `0`） |
+| 鲁棒性、E2E 与总线配置矩阵 | `32/64/128-bit` x `WB/AXI4` 全矩阵（`make test-bus-cfg`）、Abort/Reset、DMA E2E（`model_c/e/s`） | `45/45 + 6/6 通过` |
+| SoC Verilator 整网链式 E2E | 公开代号模型（`model_c`、`model_e`、`model_s` 在 `32/64/128-bit` 总线下验证） | 逐层逐 word bit-exact 通过（`128-bit` 下端到端峰值 MAC 利用率：`model_e` `87.5%`，64 层 `model_s` `50.2%`） |
+| Yosys 全芯片真综合（`synth -top npu_top`，0 黑盒） | 全部可综合 RTL 模块（`$div = 0`，`$mod = 0`） | **`44,626` cells**（`32b WB`）/ **`45,441` cells**（`128b AXI4`，仅 `+1.83%`） |
 
 ## 相关仓库
 
